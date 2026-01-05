@@ -251,39 +251,39 @@ export const GameTable: React.FC<Props> = ({
   };
 
   return (
-    <div className="relative w-full h-screen bg-green-800 overflow-hidden flex items-center justify-center">
-      <div className="absolute inset-20 border-4 border-yellow-600 rounded-3xl opacity-30 pointer-events-none"></div>
+    <div className="relative w-full h-screen bg-[#1e1e1e] overflow-hidden flex items-center justify-center font-mono">
+      <div className="absolute inset-20 border-2 border-[#333333] rounded-xl opacity-50 pointer-events-none"></div>
 
       <PlayerArea data={top} pos="top-4 left-1/2 -translate-x-1/2" />
       <PlayerArea data={left} pos="left-8 top-1/2 -translate-y-1/2" />
       <PlayerArea data={right} pos="right-8 top-1/2 -translate-y-1/2" />
       
       {/* Chat Box */}
-      <div className="absolute top-4 right-4 w-64 h-48 bg-black/40 rounded flex flex-col pointer-events-auto z-10">
-          <div className="flex-1 overflow-y-auto p-2 text-sm text-white scrollbar-thin">
+      <div className="absolute top-4 right-4 w-64 h-48 bg-[#252526] border border-[#333333] rounded flex flex-col pointer-events-auto z-10 shadow-lg">
+          <div className="flex-1 overflow-y-auto p-2 text-sm text-[#d4d4d4] scrollbar-thin">
               {chatMessages.map((msg, i) => (
                   <div key={i} className="mb-1">
-                      <span className="text-gray-400">[{msg.time}] </span>
-                      <span className="font-bold text-yellow-300">{msg.sender}: </span>
+                      <span className="text-[#858585] text-xs">[{msg.time}] </span>
+                      <span className="font-bold text-[#569cd6]">{msg.sender}: </span>
                       <span>{msg.text}</span>
                   </div>
               ))}
               <div ref={chatEndRef} />
           </div>
-          <form onSubmit={handleChatSubmit} className="p-2 border-t border-white/20 flex">
+          <form onSubmit={handleChatSubmit} className="p-2 border-t border-[#333333] flex">
               <input 
-                  className="flex-1 bg-transparent border-none text-white text-sm focus:outline-none" 
-                  placeholder="Type a message..." 
+                  className="flex-1 bg-[#3c3c3c] border-none text-white text-sm focus:outline-none rounded px-2" 
+                  placeholder="Type..." 
                   value={chatInput}
                   onChange={e => setChatInput(e.target.value)}
               />
-              <button type="submit" className="text-blue-300 font-bold text-sm ml-2">Send</button>
+              <button type="submit" className="text-[#0e639c] font-bold text-sm ml-2 hover:text-[#1177bb]">Send</button>
           </form>
       </div>
 
       {gameState && (
-          <div className="absolute top-4 left-4 text-white font-bold text-xl bg-black/30 p-2 rounded">
-              Current Level: {gameState.level}
+          <div className="absolute top-4 left-4 text-[#d4d4d4] font-bold text-xl bg-[#252526] border border-[#333333] px-4 py-2 rounded shadow-lg">
+              <span className="text-[#569cd6]">const</span> <span className="text-[#9cdcfe]">Level</span> = <span className="text-[#b5cea8]">{gameState.level}</span>;
           </div>
       )}
       

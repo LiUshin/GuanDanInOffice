@@ -16,36 +16,36 @@ export const Lobby: React.FC<Props> = ({ onJoin }) => {
   };
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-green-800 text-white">
-      <h1 className="text-5xl font-bold mb-8">局域网掼蛋</h1>
-      <form onSubmit={handleSubmit} className="bg-white p-8 rounded-lg shadow-xl text-black flex flex-col gap-4 w-80">
+    <div className="flex flex-col items-center justify-center min-h-screen bg-[#1e1e1e] text-gray-300">
+      <h1 className="text-5xl font-bold mb-8 text-[#519aba] font-mono">VS Code - GuanDan</h1>
+      <form onSubmit={handleSubmit} className="bg-[#252526] p-8 rounded-lg shadow-xl border border-[#333333] text-gray-300 flex flex-col gap-4 w-80">
         <div>
-          <label className="block text-sm font-bold mb-2">昵称</label>
+          <label className="block text-sm font-bold mb-2 text-[#9cdcfe]">Username</label>
           <input
             type="text"
             value={name}
             onChange={e => setName(e.target.value)}
-            className="w-full border p-2 rounded"
-            placeholder="请输入名字"
+            className="w-full bg-[#3c3c3c] border border-[#3c3c3c] p-2 rounded text-white focus:outline-none focus:border-[#007acc]"
+            placeholder="Enter name..."
             maxLength={10}
             required
           />
         </div>
         <div>
-          <label className="block text-sm font-bold mb-2">房间号</label>
+          <label className="block text-sm font-bold mb-2 text-[#9cdcfe]">Room ID</label>
           <input
             type="text"
             value={roomId}
             onChange={e => setRoomId(e.target.value)}
-            className="w-full border p-2 rounded"
-            placeholder="默认: default"
+            className="w-full bg-[#3c3c3c] border border-[#3c3c3c] p-2 rounded text-white focus:outline-none focus:border-[#007acc]"
+            placeholder="Default: default"
           />
         </div>
         <button 
           type="submit" 
-          className="bg-green-600 text-white py-2 rounded hover:bg-green-700 font-bold"
+          className="bg-[#0e639c] text-white py-2 rounded hover:bg-[#1177bb] font-bold mt-2"
         >
-          加入游戏
+          Connect
         </button>
       </form>
     </div>
