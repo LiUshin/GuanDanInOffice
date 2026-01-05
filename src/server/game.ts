@@ -480,18 +480,28 @@ export class Game {
       this.advanceTurn();
       
       if (this.passCount === 3) {
-          this.currentTurn = this.lastHand!.playerIndex;
+          // All passed, turn goes back to last player who played
+          let nextTurn = this.lastHand!.playerIndex;
           this.lastHand = null;
           this.passCount = 0;
           
-          if (this.hands[this.currentTurn].length === 0) {
-              // Partner leads logic simplified: Next player
-               const partner = (this.currentTurn + 2) % 4;
-               this.currentTurn = partner;
-               if (this.hands[this.currentTurn].length === 0) {
-                   // Pass to next opponent
-                    this.currentTurn = (this.currentTurn + 1) % 4;
-               }
+          // Find next player with cards (could be partner or opponent)
+          // Priority: self > partner > next opponent > last opponent
+          const order = [nextTurn, (nextTurn + 2) % 4, (nextTurn + 1) % 4, (nextTurn + 3) % 4];
+          let found = false;
+          for (const seat of order) {
+              if (this.hands[seat].length > 0) {
+                  this.currentTurn = seat;
+                  found = true;
+                  break;
+              }
+          }
+          
+          if (!found) {
+              // All finished? Should not happen normally, but end game just in case.
+              console.log('[handlePass] All players finished, ending game');
+              this.endGame();
+              return;
           }
       }
       
@@ -499,18 +509,22 @@ export class Game {
   }
   
   advanceTurn() {
+      const prevTurn = this.currentTurn;
       let next = (this.currentTurn + 1) % 4;
       let count = 0;
       // Skip finished players
       while (this.hands[next].length === 0 && count < 4) {
+          console.log(`[advanceTurn] Skipping seat ${next} (no cards)`);
           next = (next + 1) % 4;
           count++;
       }
       if (count === 4) {
+          console.log(`[advanceTurn] All players finished, ending game`);
           this.endGame();
           return;
       }
       this.currentTurn = next;
+      console.log(`[advanceTurn] Turn changed: ${prevTurn} -> ${next}. Player ${next} has ${this.hands[next].length} cards.`);
   }
   
   endGame() {
@@ -545,18 +559,40 @@ export class Game {
     // Bot Turn Logic
     const currentPlayer = this.players[this.currentTurn];
     if (currentPlayer && currentPlayer.isBot && this.currentPhase === GamePhase.Playing && this.winners.length < 3) {
-        // Prevent multiple timeouts
-        setTimeout(() => this.handleBotTurn(this.currentTurn), 1500);
+        // Capture the current seat to avoid race conditions
+        const botSeat = this.currentTurn;
+        console.log(`[Bot] Scheduling Bot ${botSeat} to play in 1.5s...`);
+        setTimeout(() => this.handleBotTurn(botSeat), 1500);
+    } else {
+        // Human's turn or game over
+        console.log(`[Turn] Now waiting for Player ${this.currentTurn} (Human) to play. Phase: ${this.currentPhase}`);
     }
   }
   
   handleBotTurn(seatIndex: number) {
-      if (this.currentPhase !== GamePhase.Playing) return;
-      if (this.currentTurn !== seatIndex) return;
+      console.log(`[Bot] handleBotTurn called for seat ${seatIndex}. currentTurn=${this.currentTurn}, phase=${this.currentPhase}`);
+      
+      if (this.currentPhase !== GamePhase.Playing) {
+          console.log(`[Bot] Abort: Phase is ${this.currentPhase}, not Playing`);
+          return;
+      }
+      if (this.currentTurn !== seatIndex) {
+          console.log(`[Bot] Abort: currentTurn is ${this.currentTurn}, not ${seatIndex}`);
+          return;
+      }
       
       const hand = this.hands[seatIndex];
+      if (hand.length === 0) {
+          console.log(`[Bot] Seat ${seatIndex} has no cards left, skipping...`);
+          this.advanceTurn();
+          this.broadcastGameState();
+          return;
+      }
+      
       const bot = new Bot(hand, this.level);
       const move = bot.decideMove(this.lastHand ? this.lastHand.hand : null);
+      
+      console.log(`[Bot] Seat ${seatIndex} decides: ${move ? `Play ${move.length} cards` : 'Pass'}`);
       
       if (move) {
           this.handlePlayHand(seatIndex, move);

@@ -45,6 +45,7 @@ export function useGame() {
     });
 
     socket.on('gameState', (state: GameState) => {
+      console.log(`[Client] Received gameState: currentTurn=${state.currentTurn}, phase=${state.phase}, mySeat will compare with ${state.currentTurn}`);
       setGameState(state);
     });
 

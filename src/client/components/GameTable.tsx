@@ -303,6 +303,13 @@ export const GameTable: React.FC<Props> = ({
       </div>
 
       <div className="absolute bottom-0 w-full flex flex-col items-center pb-4 z-20 pointer-events-none">
+        {/* Debug Info - remove in production */}
+        {gameState && (
+            <div className="text-xs text-gray-500 mb-1 pointer-events-auto">
+                [Debug] mySeat={mySeat}, currentTurn={gameState.currentTurn}, phase={gameState.phase}, isMyTurn={gameState.currentTurn === mySeat}
+            </div>
+        )}
+        
         {/* Controls Container */}
         <div className="mb-8 pointer-events-auto">
             {gameState && gameState.currentTurn === mySeat && gameState.phase === 'Playing' && (

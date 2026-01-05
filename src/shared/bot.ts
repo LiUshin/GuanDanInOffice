@@ -11,15 +11,21 @@ export class Bot {
   }
 
   decideMove(target: Hand | null): Card[] | null {
+    // Safety check: No cards means no move
+    if (this.cards.length === 0) {
+        console.log('[Bot] No cards left, returning null');
+        return null;
+    }
+    
     if (!target) {
-      // Free play priority:
+      // Free play - MUST return something (cannot pass on free turn)
+      
+      // Priority:
       // 1. Straight (5) or Tube (6) or Plate (6) - long hands first
       // 2. Trips with Pair (5)
       // 3. Trips (3)
       // 4. Pair (2)
       // 5. Single (1)
-      
-      // Try Straight/Tube/Plate (Not implemented in getGroups, skipping for now)
       
       // Try Full House
       const trips = this.getGroups(3);
@@ -33,11 +39,9 @@ export class Bot {
       const pairs = this.getGroups(2);
       if (pairs.length > 0) return pairs[0]; // Smallest pair
       
-      if (this.cards.length === 1) {
-          return [this.cards[0]];
-      }
-
-      return [this.cards[this.cards.length - 1]]; // Smallest single
+      // Last resort: play smallest single card
+      // This handles both 1 card left and multiple different single cards
+      return [this.cards[this.cards.length - 1]];
     }
 
     // Must beat target
