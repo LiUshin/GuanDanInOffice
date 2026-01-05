@@ -198,7 +198,12 @@ export const GameTable: React.FC<Props> = ({
              </div>
          )}
        </div>
-       <div className="text-white font-bold">{data.player ? data.player.name : (gameState ? 'Waiting...' : '点击入座')}</div>
+       <div className="text-white font-bold flex items-center gap-2">
+           {data.player ? data.player.name : (gameState ? 'Waiting...' : '点击入座')}
+           {data.player && (data.player as any).isDisconnected && (
+               <span className="text-red-500 text-xs font-bold bg-white px-1 rounded animate-pulse">OFF</span>
+           )}
+       </div>
        {gameState && <div className="text-yellow-400">Cards: {data.handCount}</div>}
        {data.player && data.player.isReady && !gameState && <div className="text-green-400 text-sm">Ready</div>}
        {gameState && gameState.currentTurn === data.seat && (

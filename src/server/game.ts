@@ -57,12 +57,26 @@ export class Game {
     // Setup listeners for human players
     this.players.forEach(p => {
         if (!p.isBot && p.socket) {
-            p.socket.on('playHand', (cards: Card[]) => this.handlePlayHand(p.seatIndex, cards));
-            p.socket.on('pass', () => this.handlePass(p.seatIndex));
-            p.socket.on('tribute', (cards: Card[]) => this.handleTribute(p.seatIndex, cards));
-            p.socket.on('returnTribute', (cards: Card[]) => this.handleReturnTribute(p.seatIndex, cards));
+            this.bindPlayerListeners(p);
         }
     });
+  }
+  
+  rebindPlayer(p: Player) {
+      if (!p.isBot && p.socket) {
+          // Remove old listeners? Socket is new, so no need to remove old ones from new socket.
+          // Old socket is dead.
+          this.bindPlayerListeners(p);
+      }
+  }
+  
+  bindPlayerListeners(p: Player) {
+      if (!p.socket) return;
+      const s = p.socket;
+      s.on('playHand', (cards: Card[]) => this.handlePlayHand(p.seatIndex, cards));
+      s.on('pass', () => this.handlePass(p.seatIndex));
+      s.on('tribute', (cards: Card[]) => this.handleTribute(p.seatIndex, cards));
+      s.on('returnTribute', (cards: Card[]) => this.handleReturnTribute(p.seatIndex, cards));
   }
 
   // Called by Room when restarting
@@ -385,8 +399,14 @@ export class Game {
           return;
       }
       
+      // Debug Log
+      console.log(`Player ${seatIndex} plays. Level: ${this.level}. Hand: ${hand.type} (Val: ${hand.value}). LastHand: ${this.lastHand ? `${this.lastHand.hand.type} (Val: ${this.lastHand.hand.value})` : 'None'}`);
+
       if (this.lastHand && this.lastHand.playerIndex !== seatIndex) {
-          if (compareHands(hand, this.lastHand.hand) <= 0) {
+          // Compare
+          const result = compareHands(hand, this.lastHand.hand);
+          if (result <= 0) {
+               console.log(`Compare failed: ${result}`);
                this.emitError(seatIndex, 'Hand not big enough');
                return;
           }
@@ -410,7 +430,7 @@ export class Game {
       if (this.hands[seatIndex].length === 0) {
           this.winners.push(seatIndex);
           
-          // Check Double Win
+          // Check Double Win (First two winners are same team)
           if (this.winners.length === 2) {
               const p1 = this.winners[0];
               const p2 = this.winners[1];
@@ -423,7 +443,17 @@ export class Game {
               }
           }
           
-          // Check 3 players finished
+          // Check Any Team Finished (Both players of a team are in winners list)
+          // Since Double Win checks 1st/2nd, we just need to check if game should end when 3rd winner is determined?
+          // OR if Team A finishes at positions 1 and 3.
+          // OR if Team B finishes at positions 2 and 3? (Impossible if A took 1)
+          
+          // General Rule: If 3 players have finished, game MUST end.
+          // Because if 3 finished, at least one team has 2 members finished.
+          // Is it possible for a team to finish earlier?
+          // We checked 2 players above.
+          // So if 3 players finish, we are done.
+          
           if (this.winners.length === 3) {
               // 4th player is the loser
               const last = [0, 1, 2, 3].find(i => !this.winners.includes(i))!;

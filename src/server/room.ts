@@ -2,12 +2,13 @@ import { Server, Socket } from 'socket.io';
 import { Game } from './game';
 
 interface Player {
-  id: string;
+  id: string; // Socket ID (Current)
   name: string;
   socket?: Socket;
   seatIndex: number; // 0-3
   isReady: boolean;
   isBot?: boolean;
+  isDisconnected?: boolean; // New flag
 }
 
 export class RoomManager {
@@ -29,7 +30,7 @@ export class RoomManager {
 
   handleDisconnect(socket: Socket) {
     for (const room of this.rooms.values()) {
-      room.removePlayer(socket);
+      room.handleDisconnect(socket);
     }
   }
 }
@@ -46,6 +47,46 @@ class Room {
   }
 
   addPlayer(socket: Socket, name: string) {
+    // Check for reconnection first
+    const existingPlayerIndex = this.players.findIndex(p => p && p.name === name && p.isDisconnected);
+    if (existingPlayerIndex !== -1) {
+        // Reconnect logic
+        const player = this.players[existingPlayerIndex]!;
+        player.isDisconnected = false;
+        player.id = socket.id; // Update socket ID
+        player.socket = socket;
+        
+        socket.join(this.id);
+        
+        // Re-bind listeners
+        this.bindSocketListeners(socket, existingPlayerIndex);
+        
+        // If game is running, update game player ref?
+        if (this.game) {
+            this.game.players[existingPlayerIndex] = player;
+            // Also need to re-bind game listeners!
+            this.game.rebindPlayer(player);
+            // Send current game state to reconnected player
+            const p = player;
+            socket.emit('gameState', {
+                phase: this.game.currentPhase,
+                level: this.game.level,
+                currentTurn: this.game.currentTurn,
+                hands: this.game.hands.map((h, i) => i === p.seatIndex ? h : h.length),
+                lastHand: this.game.lastHand,
+                winners: this.game.winners,
+                tributeState: this.game.currentPhase === 'Tribute' || this.game.currentPhase === 'ReturnTribute' ? this.game.tributeState : undefined,
+                teamLevels: this.game.teamLevels,
+                activeTeam: this.game.activeTeam
+            });
+        }
+        
+        this.io.to(this.id).emit('error', `Player ${name} reconnected!`);
+        this.broadcastState();
+        return;
+    }
+
+    // Normal Join
     // Find empty seat
     const seatIndex = this.players.findIndex(p => p === null);
     if (seatIndex === -1) {
@@ -64,9 +105,19 @@ class Room {
     this.players[seatIndex] = player;
     socket.join(this.id);
     
+    this.bindSocketListeners(socket, seatIndex);
+    
+    // Broadcast update
+    this.broadcastState();
+  }
+  
+  bindSocketListeners(socket: Socket, seatIndex: number) {
     // Listen for room events
-    // Use dynamic lookup instead of closure seatIndex to support swapping
     socket.on('ready', () => {
+        // Use current seat index from player object in case of swap
+        // Actually bind by socket ID lookup is safer if swapping is allowed.
+        // But here we pass seatIndex.
+        // Let's stick to dynamic lookup in methods.
         const idx = this.getSeat(socket);
         if (idx !== -1) this.setReady(idx, true);
     });
@@ -75,12 +126,8 @@ class Room {
         if (idx !== -1) this.forceStart(idx);
     });
     
-    // New Features
     socket.on('chatMessage', (msg: string) => this.handleChat(socket, msg));
     socket.on('switchSeat', (targetSeat: number) => this.switchSeat(socket, targetSeat));
-    
-    // Broadcast update
-    this.broadcastState();
   }
 
   handleChat(socket: Socket, msg: string) {
@@ -105,17 +152,6 @@ class Room {
           this.players[targetSeat] = p;
           this.players[currentIdx] = null;
           
-          // Re-bind listeners for seat-based logic if any (mostly index based)
-          // But our socket logic uses closure 'seatIndex' which is now stale!
-          // We need to update how we handle seat actions.
-          // Actually, 'addPlayer' closure binds 'seatIndex'. 
-          // FIX: The listeners (playHand etc) in Game use p.seatIndex which is updated.
-          // BUT room listeners like setReady use the closure variable.
-          // For MVP: We must update the socket listeners or use dynamic lookup.
-          
-          // Re-register room listeners is hard without clearing old ones.
-          // Easier: Clients send actions, server looks up seat by socket ID.
-          
           this.broadcastState();
       }
   }
@@ -126,21 +162,27 @@ class Room {
       return p ? p.seatIndex : -1;
   }
 
-  removePlayer(socket: Socket) {
+  handleDisconnect(socket: Socket) {
     const index = this.players.findIndex(p => p && p.id === socket.id);
     if (index !== -1) {
-      const playerName = this.players[index]?.name;
-      this.players[index] = null;
+      const player = this.players[index]!;
+      const playerName = player.name;
       
-      // If game running, reset?
+      // Mark as disconnected instead of removing
+      player.isDisconnected = true;
+      player.isReady = false; // Unready
+      // player.socket = undefined; // Don't remove ref entirely? or optional?
+      
+      // If game running, DO NOT end game immediately.
+      // Allow reconnect.
       if (this.game) {
-          // Ideally convert to bot or end game
-          // For MVP: simple reset
-          this.game = null;
-          // Notify everyone about the disconnect
-          this.io.to(this.id).emit('error', `Player ${playerName} disconnected, game ended`);
+          this.io.to(this.id).emit('error', `Player ${playerName} disconnected (Waiting for reconnect...)`);
       } else {
            // If game not started, just notify
+           // Should we remove player if game not started? 
+           // Maybe yes, to free up seat? 
+           // Let's remove if game not started.
+           this.players[index] = null;
            this.io.to(this.id).emit('error', `Player ${playerName} left the room`);
       }
       this.broadcastState();
