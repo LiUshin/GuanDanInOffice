@@ -22,8 +22,9 @@ enum GamePhase {
 }
 
 interface TributeState {
-  pendingTributes: { from: number, to: number, card?: Card }[]; 
+  pendingTributes: { from: number, to: number, card?: Card }[];
   pendingReturns: { from: number, to: number, card?: Card }[];
+  nextStartPlayer?: number;
 }
 
 export class Game {
@@ -144,6 +145,15 @@ export class Game {
   }
   
   initTributePhase() {
+      if (this.prevWinners.length < 4) {
+          // First game or error, no tribute
+          this.currentPhase = GamePhase.Playing;
+          this.currentTurn = this.activeTeam; // Banker starts first game? Or Random? Usually Banker.
+          // In GuanDan, first game usually starts from Host or Random. 
+          // Let's assume ActiveTeam's P1 starts.
+          return;
+      }
+
       const p1 = this.prevWinners[0];
       const p2 = this.prevWinners[1];
       const p3 = this.prevWinners[2];
@@ -152,13 +162,57 @@ export class Game {
 
       this.tributeState = { pendingTributes: [], pendingReturns: [] };
       
-      // Tribute Rules
+      // Anti-Tribute Logic (Resistance)
+      // Check for 2 Big Jokers in losing team's hands
+      // Losing Team:
+      let losingTeam: number[] = [];
+      let isDouble = false;
+      
       if (isSameTeam(p1, p2)) {
-          // Double
-          this.tributeState.pendingTributes.push({ from: p4, to: p1 }); // Last pays First
-          this.tributeState.pendingTributes.push({ from: p3, to: p2 }); // 3rd pays 2nd
+          // Double Win
+          isDouble = true;
+          losingTeam = [p3, p4];
       } else {
-          // Single (1,3 or 1,4)
+          // Single Win (1,3 or 1,4)
+          losingTeam = [p4]; // Only last place pays in Single Win? 
+          // Rule: Single Win (1,3 same team) -> 4 pays 1.
+          // Rule: Tie (1,4 same team) -> 4 pays 1? Or no tribute?
+          // Standard: 
+          // Double Win: 4->1, 3->2.
+          // Single Win (1,3): 4->1.
+          // Tie (1,4): No tribute.
+          if (isSameTeam(p1, p4)) {
+             // Tie (1,4 same team) -> No tribute
+             this.currentPhase = GamePhase.Playing;
+             this.currentTurn = p1;
+             return;
+          }
+      }
+      
+      // Count Big Jokers in Losing Team Hands
+      let bigJokerCount = 0;
+      losingTeam.forEach(seat => {
+          bigJokerCount += this.hands[seat].filter(c => c.rank === 16).length; // Rank.BigJoker = 16
+      });
+      
+      if (bigJokerCount === 2) {
+          // Resistance Successful!
+          // No Tribute
+          // Who starts? P1 (Winner) starts.
+          this.currentPhase = GamePhase.Playing;
+          this.currentTurn = p1;
+          // Notify? Ideally send message.
+          this.io.to(this.roomId).emit('error', '抗贡成功！双大王在手，免除进贡！');
+          return;
+      }
+      
+      // Tribute Rules
+      if (isDouble) {
+          // Double: 4->1, 3->2
+          this.tributeState.pendingTributes.push({ from: p4, to: p1 }); 
+          this.tributeState.pendingTributes.push({ from: p3, to: p2 }); 
+      } else {
+          // Single: 4->1
           this.tributeState.pendingTributes.push({ from: p4, to: p1 });
       }
       
@@ -234,6 +288,49 @@ export class Game {
       
       const allDone = this.tributeState.pendingTributes.every(t => t.card);
       if (allDone) {
+          // Determine who goes first in next round (Playing Phase)
+          // Rule: "The one who paid the largest tribute goes first"
+          // If equal? (e.g. both paid Heart 5?) -> Usually the one who paid to First Place? Or downstream order?
+          // Rule: If single tribute, payer goes first.
+          // If double tribute: Compare tribute cards. Largest payer goes first.
+          // If equal max tribute cards? Payer to P1 goes first? Or P4 (Last place) goes first?
+          // Common Rule: Payer of largest card. If equal, Last Place (p4) goes first.
+          
+          let nextTurn = -1;
+          
+          // Logic for next turn needs to be stored for after Return Tribute
+          // Actually, currentTurn updates when entering Playing phase.
+          // We can calculate it now and store it? 
+          // Wait, Return Tribute phase happens next. We shouldn't set currentTurn for Playing yet.
+          // But we need to know who starts.
+          
+          // Compare tribute cards
+          let maxVal = -1;
+          let maxPayer = -1;
+          
+          this.tributeState.pendingTributes.forEach(t => {
+              if (t.card) {
+                  const val = getLogicValue(t.card.rank, this.level);
+                  if (val > maxVal) {
+                      maxVal = val;
+                      maxPayer = t.from;
+                  } else if (val === maxVal) {
+                      // Tie breaker: Usually Last Place (p4) has priority if ties with 3rd place?
+                      // Or 3rd place?
+                      // Let's stick to: If tie, the one who paid to First Winner (P1) gets priority? 
+                      // Actually rules say: "If tribute cards are equal, the tributer to the first winner goes first" (Some rules)
+                      // OR "Last place goes first"
+                      // Let's assume maxPayer updates only if STRICTLY greater, so first one found keeps it.
+                      // Order is p4->p1, p3->p2. So p4 is checked first.
+                      // If p3 pays same value, maxVal is same, maxPayer stays p4.
+                      // So p4 (Last place) wins tie.
+                  }
+              }
+          });
+          
+          // Store this for later use in checkReturnDone
+          this.tributeState.nextStartPlayer = maxPayer;
+
           this.currentPhase = GamePhase.ReturnTribute;
           this.tributeState.pendingReturns = this.tributeState.pendingTributes.map(t => ({
               from: t.to,
@@ -266,10 +363,15 @@ export class Game {
       const allDone = this.tributeState.pendingReturns.every(r => r.card);
       if (allDone) {
           this.currentPhase = GamePhase.Playing;
-          this.tributeState.pendingReturns = [];
-          this.currentTurn = this.prevWinners[0]; // First winner starts
-          this.lastHand = null;
-          this.passCount = 0;
+          // Set start player based on tribute result
+          if (this.tributeState.nextStartPlayer !== undefined) {
+              this.currentTurn = this.tributeState.nextStartPlayer;
+          } else {
+              // Fallback (Shouldn't happen if tribute occurred)
+              this.currentTurn = this.prevWinners[0];
+          }
+          this.tributeState = { pendingTributes: [], pendingReturns: [] }; // Clear
+          this.broadcastGameState();
       }
   }
 
