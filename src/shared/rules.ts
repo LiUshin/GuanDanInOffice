@@ -201,12 +201,14 @@ export function compareHands(handA: Hand, handB: Hand): number {
     const isBombA = handA.type === HandType.Bomb || handA.type === HandType.StraightFlush;
     const isBombB = handB.type === HandType.Bomb || handB.type === HandType.StraightFlush;
     
+    // Special Case: Bomb beats normal hands
     if (isBombA && !isBombB) return 1;
     if (!isBombA && isBombB) return -1;
     
+    // Both Bombs (or SF)
     if (isBombA && isBombB) {
         const getScore = (h: Hand) => {
-            if (h.type === HandType.StraightFlush) return 5.5; 
+            if (h.type === HandType.StraightFlush) return 5.5; // SF beats 5-Bomb, loses to 6-Bomb
             return h.bombCount!;
         };
         const sA = getScore(handA);
@@ -215,7 +217,8 @@ export function compareHands(handA: Hand, handB: Hand): number {
         return handA.value - handB.value;
     }
     
-    if (handA.type !== handB.type) return 0;
+    // Normal Hands Comparison
+    if (handA.type !== handB.type) return 0; // Different types cannot compare (unless bombs)
     if (handA.cards.length !== handB.cards.length) return 0;
     
     return handA.value - handB.value;
