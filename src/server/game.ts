@@ -477,10 +477,18 @@ export class Game {
       }
       
       this.passCount++;
-      this.advanceTurn();
       
-      if (this.passCount === 3) {
-          // All passed, turn goes back to last player who played
+      // Calculate how many active players (those with cards) remain
+      const activePlayers = this.hands.filter(h => h.length > 0).length;
+      // All OTHER active players must pass for the round to reset
+      // (activePlayers - 1) because the last player who played doesn't pass on themselves
+      const passThreshold = activePlayers - 1;
+      
+      console.log(`[handlePass] Player ${seatIndex} passed. passCount=${this.passCount}, activePlayers=${activePlayers}, threshold=${passThreshold}`);
+      
+      if (this.passCount >= passThreshold) {
+          // All other active players passed, turn goes back to last player who played
+          console.log(`[handlePass] All others passed. Returning to player ${this.lastHand!.playerIndex}`);
           let nextTurn = this.lastHand!.playerIndex;
           this.lastHand = null;
           this.passCount = 0;
@@ -493,6 +501,7 @@ export class Game {
               if (this.hands[seat].length > 0) {
                   this.currentTurn = seat;
                   found = true;
+                  console.log(`[handlePass] Next turn goes to seat ${seat}`);
                   break;
               }
           }
@@ -503,8 +512,12 @@ export class Game {
               this.endGame();
               return;
           }
+          
+          this.broadcastGameState();
+          return;
       }
       
+      this.advanceTurn();
       this.broadcastGameState();
   }
   
