@@ -192,6 +192,11 @@ export const GameTable: React.FC<Props> = ({
          {data.player ? data.player.name[0].toUpperCase() : (gameState ? '?' : '+')}
          {data.isTeammate && <div className="absolute -top-1 -right-1 bg-blue-500 text-xs text-white px-1 rounded">友</div>}
          {data.isOpponent && <div className="absolute -top-1 -right-1 bg-red-500 text-xs text-white px-1 rounded">敌</div>}
+         {data.player && data.player.seatIndex === 0 && (
+             <div className="absolute -bottom-1 -right-1 text-xs bg-yellow-500 text-black px-1 rounded font-bold border border-white">
+                 Host
+             </div>
+         )}
        </div>
        <div className="text-white font-bold">{data.player ? data.player.name : (gameState ? 'Waiting...' : '点击入座')}</div>
        {gameState && <div className="text-yellow-400">Cards: {data.handCount}</div>}

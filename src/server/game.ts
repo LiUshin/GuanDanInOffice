@@ -409,6 +409,28 @@ export class Game {
       
       if (this.hands[seatIndex].length === 0) {
           this.winners.push(seatIndex);
+          
+          // Check Double Win
+          if (this.winners.length === 2) {
+              const p1 = this.winners[0];
+              const p2 = this.winners[1];
+              if ((p1 % 2) === (p2 % 2)) {
+                  // Double Win!
+                  const losers = [0, 1, 2, 3].filter(i => !this.winners.includes(i));
+                  this.winners.push(...losers); 
+                  this.endGame();
+                  return;
+              }
+          }
+          
+          // Check 3 players finished
+          if (this.winners.length === 3) {
+              // 4th player is the loser
+              const last = [0, 1, 2, 3].find(i => !this.winners.includes(i))!;
+              this.winners.push(last);
+              this.endGame();
+              return;
+          }
       }
       
       this.advanceTurn();
