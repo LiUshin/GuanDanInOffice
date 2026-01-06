@@ -8,6 +8,7 @@ export interface GameState {
   currentTurn: number;
   hands: (Card[] | number)[]; 
   lastHand: { playerIndex: number, hand: any } | null;
+  roundActions?: { [seat: number]: { type: 'play' | 'pass', cards?: Card[], hand?: any } };
   winners: number[];
   tributeState?: {
       pendingTributes: { from: number, to: number, card?: any }[];
@@ -53,11 +54,18 @@ export function useGame() {
       setError(msg);
       setTimeout(() => setError(null), 3000);
     });
+    
+    socket.on('gameOver', (data: { winners: number[] }) => {
+      console.log(`[Client] Game Over! Winners: ${data.winners.join(', ')}`);
+      // The gameState should already be updated via broadcastGameState
+      // This event is just a confirmation
+    });
 
     return () => {
       socket.off('roomState');
       socket.off('gameState');
       socket.off('error');
+      socket.off('gameOver');
     };
   }, []);
 

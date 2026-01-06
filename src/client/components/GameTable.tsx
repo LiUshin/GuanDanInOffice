@@ -183,34 +183,70 @@ export const GameTable: React.FC<Props> = ({
     );
   };
 
-  const PlayerArea = ({ data, pos }: { data: any, pos: string }) => (
-    <div 
-        className={`absolute ${pos} flex flex-col items-center p-4 rounded-lg transition-colors ${data.isTeammate ? 'bg-blue-900/40 border-2 border-blue-400' : 'bg-black/20'} ${!gameState && !data.player ? 'cursor-pointer hover:bg-white/10' : ''}`}
-        onClick={() => !gameState && !data.player && onSwitchSeat(data.seat)}
-    >
-       <div className="w-12 h-12 bg-gray-300 rounded-full flex items-center justify-center mb-2 relative">
-         {data.player ? data.player.name[0].toUpperCase() : (gameState ? '?' : '+')}
-         {data.isTeammate && <div className="absolute -top-1 -right-1 bg-blue-500 text-xs text-white px-1 rounded">友</div>}
-         {data.isOpponent && <div className="absolute -top-1 -right-1 bg-red-500 text-xs text-white px-1 rounded">敌</div>}
-         {data.player && data.player.seatIndex === 0 && (
-             <div className="absolute -bottom-1 -right-1 text-xs bg-yellow-500 text-black px-1 rounded font-bold border border-white">
-                 Host
+  // Helper to render cards played in round action
+  const renderActionCards = (cards: CardType[] | undefined) => {
+      if (!cards || cards.length === 0) return null;
+      return (
+          <div className="flex gap-0.5 mt-1">
+              {cards.slice(0, 6).map((card, i) => (
+                  <div key={i} className="w-6 h-8 bg-white rounded text-xs flex items-center justify-center font-bold border border-gray-300"
+                       style={{ color: (card.suit === Suit.Hearts || card.suit === Suit.Diamonds) ? 'red' : 'black' }}>
+                      {card.rank === Rank.SmallJoker ? '🃏' : card.rank === Rank.BigJoker ? '🃟' : 
+                       ['', '', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'][card.rank] || '?'}
+                  </div>
+              ))}
+              {cards.length > 6 && <span className="text-white text-xs">+{cards.length - 6}</span>}
+          </div>
+      );
+  };
+
+  const PlayerArea = ({ data, pos }: { data: any, pos: string }) => {
+    const action = gameState?.roundActions?.[data.seat];
+    
+    return (
+      <div 
+          className={`absolute ${pos} flex flex-col items-center p-4 rounded-lg transition-colors ${data.isTeammate ? 'bg-blue-900/40 border-2 border-blue-400' : 'bg-black/20'} ${!gameState && !data.player ? 'cursor-pointer hover:bg-white/10' : ''}`}
+          onClick={() => !gameState && !data.player && onSwitchSeat(data.seat)}
+      >
+         <div className="w-12 h-12 bg-gray-300 rounded-full flex items-center justify-center mb-2 relative">
+           {data.player ? data.player.name[0].toUpperCase() : (gameState ? '?' : '+')}
+           {data.isTeammate && <div className="absolute -top-1 -right-1 bg-blue-500 text-xs text-white px-1 rounded">友</div>}
+           {data.isOpponent && <div className="absolute -top-1 -right-1 bg-red-500 text-xs text-white px-1 rounded">敌</div>}
+           {data.player && data.player.seatIndex === 0 && (
+               <div className="absolute -bottom-1 -right-1 text-xs bg-yellow-500 text-black px-1 rounded font-bold border border-white">
+                   Host
+               </div>
+           )}
+         </div>
+         <div className="text-white font-bold flex items-center gap-2">
+             {data.player ? data.player.name : (gameState ? 'Waiting...' : '点击入座')}
+             {data.player && (data.player as any).isDisconnected && (
+                 <span className="text-red-500 text-xs font-bold bg-white px-1 rounded animate-pulse">OFF</span>
+             )}
+         </div>
+         {gameState && <div className="text-yellow-400">Cards: {data.handCount}</div>}
+         {data.player && data.player.isReady && !gameState && <div className="text-green-400 text-sm">Ready</div>}
+         
+         {/* Show current round action */}
+         {gameState && action && (
+             <div className="mt-2 flex flex-col items-center">
+                 {action.type === 'pass' ? (
+                     <div className="text-gray-400 font-bold text-sm bg-gray-700/50 px-3 py-1 rounded">过</div>
+                 ) : (
+                     <div className="flex flex-col items-center">
+                         <div className="text-green-400 text-xs mb-1">{action.hand?.type || '出牌'}</div>
+                         {renderActionCards(action.cards)}
+                     </div>
+                 )}
              </div>
          )}
-       </div>
-       <div className="text-white font-bold flex items-center gap-2">
-           {data.player ? data.player.name : (gameState ? 'Waiting...' : '点击入座')}
-           {data.player && (data.player as any).isDisconnected && (
-               <span className="text-red-500 text-xs font-bold bg-white px-1 rounded animate-pulse">OFF</span>
-           )}
-       </div>
-       {gameState && <div className="text-yellow-400">Cards: {data.handCount}</div>}
-       {data.player && data.player.isReady && !gameState && <div className="text-green-400 text-sm">Ready</div>}
-       {gameState && gameState.currentTurn === data.seat && (
-           <div className="animate-bounce text-red-500 font-bold">Thinking...</div>
-       )}
-    </div>
-  );
+         
+         {gameState && gameState.currentTurn === data.seat && !action && (
+             <div className="animate-bounce text-red-500 font-bold mt-2">Thinking...</div>
+         )}
+      </div>
+    );
+  };
 
   const getStackedMatrix = () => {
       if (!gameState) return [];
@@ -306,7 +342,7 @@ export const GameTable: React.FC<Props> = ({
         {/* Debug Info - remove in production */}
         {gameState && (
             <div className="text-xs text-gray-500 mb-1 pointer-events-auto">
-                [Debug] mySeat={mySeat}, currentTurn={gameState.currentTurn}, phase={gameState.phase}, isMyTurn={gameState.currentTurn === mySeat}
+                [Debug] mySeat={mySeat}, currentTurn={gameState.currentTurn}, phase={gameState.phase}, isMyTurn={String(gameState.currentTurn === mySeat)}, myCards={Array.isArray(gameState.hands[mySeat]) ? (gameState.hands[mySeat] as any[]).length : '?'}
             </div>
         )}
         

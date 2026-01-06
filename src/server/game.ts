@@ -41,6 +41,9 @@ export class Game {
   lastHand: { playerIndex: number, hand: Hand } | null = null;
   passCount: number = 0;
   
+  // Track each player's action in current round (for display)
+  roundActions: { [seat: number]: { type: 'play' | 'pass', cards?: Card[], hand?: Hand } } = {};
+  
   winners: number[] = [];
   tributeState: TributeState = { pendingTributes: [], pendingReturns: [] };
   
@@ -427,6 +430,10 @@ export class Game {
       this.lastHand = { playerIndex: seatIndex, hand };
       this.passCount = 0;
       
+      // Reset round actions when someone plays (new round starts)
+      this.roundActions = {};
+      this.roundActions[seatIndex] = { type: 'play', cards: cards, hand: hand };
+      
       if (this.hands[seatIndex].length === 0) {
           this.winners.push(seatIndex);
           
@@ -477,6 +484,7 @@ export class Game {
       }
       
       this.passCount++;
+      this.roundActions[seatIndex] = { type: 'pass' };
       
       // Calculate how many active players (those with cards) remain
       const activePlayers = this.hands.filter(h => h.length > 0).length;
@@ -541,7 +549,13 @@ export class Game {
   }
   
   endGame() {
+      console.log(`[endGame] Game ended. Winners: ${this.winners.join(', ')}`);
       this.currentPhase = GamePhase.Score;
+      
+      // Broadcast final game state FIRST so clients see the last hand
+      this.broadcastGameState();
+      
+      // Then send gameOver event
       this.io.to(this.roomId).emit('gameOver', { winners: this.winners });
   }
 
@@ -561,6 +575,7 @@ export class Game {
                 currentTurn: this.currentTurn,
                 hands: this.hands.map((h, i) => i === idx ? h : h.length),
                 lastHand: this.lastHand,
+                roundActions: this.roundActions,
                 winners: this.winners,
                 tributeState: this.currentPhase === GamePhase.Tribute || this.currentPhase === GamePhase.ReturnTribute ? this.tributeState : undefined,
                 teamLevels: this.teamLevels,
