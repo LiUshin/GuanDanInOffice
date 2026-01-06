@@ -46,7 +46,7 @@ function App() {
       ) : (
           roomState && (
             <GameTable 
-              gameState={gameState!} 
+              gameState={gameState} 
               roomState={roomState}
               mySeat={mySeat}
               onPlay={actions.playHand}
@@ -58,6 +58,8 @@ function App() {
               chatMessages={chatMessages}
               onSendChat={actions.sendChat}
               onSwitchSeat={actions.switchSeat}
+              onSetGameMode={actions.setGameMode}
+              onUseSkill={actions.useSkill}
             />
         )
       )}

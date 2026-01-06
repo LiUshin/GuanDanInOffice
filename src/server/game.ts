@@ -1,7 +1,7 @@
 import { Server, Socket } from 'socket.io';
 import { createDeck, shuffleDeck, updateCardProperties } from '../shared/deck';
 import { getHandType, compareHands, sortCards, getLargestCard, getLogicValue } from '../shared/rules';
-import { Card, Hand, HandType } from '../shared/types';
+import { Card, Hand, HandType, GameMode, SkillCard, SkillCardType, Suit, Rank } from '../shared/types';
 import { Bot } from '../shared/bot';
 
 interface Player {
@@ -51,11 +51,18 @@ export class Game {
   teamLevels: { [key: number]: number } = { 0: 2, 1: 2 }; // Team 0 (0,2), Team 1 (1,3)
   activeTeam: number = 0; // Who is upgrading currently (Banker Team)
   prevWinners: number[] = [];
+  
+  // Skill Mode
+  gameMode: GameMode = GameMode.Normal;
+  skillCards: SkillCard[][] = [[], [], [], []];  // Each player's skill cards
+  skipNextTurn: boolean[] = [false, false, false, false];  // 乐不思蜀 effect
+  newCardIds: { [seat: number]: string[] } = {};  // Track newly acquired cards for highlight
 
-  constructor(io: Server, roomId: string, players: Player[]) {
+  constructor(io: Server, roomId: string, players: Player[], gameMode: GameMode = GameMode.Normal) {
     this.io = io;
     this.roomId = roomId;
     this.players = players;
+    this.gameMode = gameMode;
     
     // Setup listeners for human players
     this.players.forEach(p => {
@@ -80,6 +87,8 @@ export class Game {
       s.on('pass', () => this.handlePass(p.seatIndex));
       s.on('tribute', (cards: Card[]) => this.handleTribute(p.seatIndex, cards));
       s.on('returnTribute', (cards: Card[]) => this.handleReturnTribute(p.seatIndex, cards));
+      s.on('useSkill', (data: { skillId: string, targetSeat?: number }) => 
+          this.handleUseSkill(p.seatIndex, data.skillId, data.targetSeat));
   }
 
   // Called by Room when restarting
@@ -119,6 +128,16 @@ export class Game {
     // Process hands
     this.hands = this.hands.map(h => updateCardProperties(h, this.level));
     this.hands = this.hands.map(h => sortCards(h, this.level));
+    
+    // Reset skip flags
+    this.skipNextTurn = [false, false, false, false];
+    
+    // Deal skill cards if in Skill mode
+    if (this.gameMode === GameMode.Skill) {
+        this.dealSkillCards();
+    } else {
+        this.skillCards = [[], [], [], []];
+    }
 
     // If it's a restart (not fresh)
     if (this.prevWinners.length > 0) {
@@ -533,20 +552,218 @@ export class Game {
       const prevTurn = this.currentTurn;
       let next = (this.currentTurn + 1) % 4;
       let count = 0;
-      // Skip finished players
-      while (this.hands[next].length === 0 && count < 4) {
-          console.log(`[advanceTurn] Skipping seat ${next} (no cards)`);
-          next = (next + 1) % 4;
-          count++;
+      // Skip finished players AND players affected by 乐不思蜀
+      while (count < 4) {
+          if (this.hands[next].length === 0) {
+              console.log(`[advanceTurn] Skipping seat ${next} (no cards)`);
+              next = (next + 1) % 4;
+              count++;
+              continue;
+          }
+          if (this.skipNextTurn[next]) {
+              console.log(`[advanceTurn] Skipping seat ${next} (乐不思蜀 effect)`);
+              this.skipNextTurn[next] = false; // Clear the skip flag after using it
+              this.io.to(this.roomId).emit('error', `${this.players[next].name} 被【乐不思蜀】跳过了回合！`);
+              next = (next + 1) % 4;
+              count++;
+              continue;
+          }
+          break;
       }
       if (count === 4) {
-          console.log(`[advanceTurn] All players finished, ending game`);
+          console.log(`[advanceTurn] All players finished or skipped, ending game`);
           this.endGame();
           return;
       }
       this.currentTurn = next;
       console.log(`[advanceTurn] Turn changed: ${prevTurn} -> ${next}. Player ${next} has ${this.hands[next].length} cards.`);
   }
+  
+  // ==================== SKILL CARD METHODS ====================
+  
+  dealSkillCards() {
+      // Create skill pool: 2 of each type = 10 cards
+      const pool: SkillCard[] = [];
+      const types = [SkillCardType.DrawTwo, SkillCardType.Steal, SkillCardType.Discard, 
+                     SkillCardType.Skip, SkillCardType.Harvest];
+      types.forEach(type => {
+          pool.push({ id: `skill-${type}-1`, type });
+          pool.push({ id: `skill-${type}-2`, type });
+      });
+      
+      // Shuffle pool
+      for (let i = pool.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [pool[i], pool[j]] = [pool[j], pool[i]];
+      }
+      
+      // Deal 2 cards to each player (8 total, 2 left in pool)
+      this.skillCards = [[], [], [], []];
+      for (let i = 0; i < 4; i++) {
+          this.skillCards[i] = [pool[i * 2], pool[i * 2 + 1]];
+      }
+      
+      console.log(`[Skill] Dealt skill cards in Skill mode`);
+  }
+  
+  generateRandomCard(): Card {
+      // Generate a random card (can create "extra" cards beyond 2 decks)
+      const suits = [Suit.Spades, Suit.Hearts, Suit.Clubs, Suit.Diamonds];
+      const ranks = [Rank.Two, Rank.Three, Rank.Four, Rank.Five, Rank.Six, Rank.Seven,
+                     Rank.Eight, Rank.Nine, Rank.Ten, Rank.Jack, Rank.Queen, Rank.King, Rank.Ace];
+      
+      // Small chance for joker
+      if (Math.random() < 0.05) {
+          const isSmall = Math.random() < 0.5;
+          return {
+              id: `gen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              suit: Suit.Joker,
+              rank: isSmall ? Rank.SmallJoker : Rank.BigJoker
+          };
+      }
+      
+      const suit = suits[Math.floor(Math.random() * suits.length)];
+      const rank = ranks[Math.floor(Math.random() * ranks.length)];
+      
+      const card: Card = {
+          id: `gen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          suit,
+          rank
+      };
+      
+      // Update properties based on current level
+      if (rank === this.level) {
+          card.isLevelCard = true;
+          if (suit === Suit.Hearts) {
+              card.isWild = true;
+          }
+      }
+      
+      return card;
+  }
+  
+  handleUseSkill(seatIndex: number, skillId: string, targetSeat?: number) {
+      if (this.gameMode !== GameMode.Skill) {
+          this.emitError(seatIndex, '当前不是技能模式');
+          return;
+      }
+      if (this.currentPhase !== GamePhase.Playing) {
+          this.emitError(seatIndex, '只能在出牌阶段使用技能');
+          return;
+      }
+      if (this.currentTurn !== seatIndex) {
+          this.emitError(seatIndex, '不是你的回合');
+          return;
+      }
+      
+      const skillIndex = this.skillCards[seatIndex].findIndex(s => s.id === skillId);
+      if (skillIndex === -1) {
+          this.emitError(seatIndex, '你没有这张技能卡');
+          return;
+      }
+      
+      const skill = this.skillCards[seatIndex][skillIndex];
+      
+      // Validate target for skills that need it
+      const needsTarget = [SkillCardType.Steal, SkillCardType.Discard, SkillCardType.Skip];
+      if (needsTarget.includes(skill.type)) {
+          if (targetSeat === undefined || targetSeat === seatIndex) {
+              this.emitError(seatIndex, '请选择一个目标玩家');
+              return;
+          }
+          // Target must be active (have cards)
+          if (this.hands[targetSeat].length === 0) {
+              this.emitError(seatIndex, '目标玩家已出完牌');
+              return;
+          }
+      }
+      
+      // Apply the skill effect
+      const success = this.applySkillEffect(skill.type, seatIndex, targetSeat);
+      
+      if (success) {
+          // Remove the used skill card
+          this.skillCards[seatIndex].splice(skillIndex, 1);
+          console.log(`[Skill] Player ${seatIndex} used ${skill.type}${targetSeat !== undefined ? ` on Player ${targetSeat}` : ''}`);
+          this.broadcastGameState();
+      }
+  }
+  
+  applySkillEffect(type: SkillCardType, user: number, target?: number): boolean {
+      const playerName = this.players[user].name;
+      const targetName = target !== undefined ? this.players[target].name : '';
+      
+      // Helper to track new cards
+      const trackNewCard = (seat: number, cardId: string) => {
+          if (!this.newCardIds[seat]) {
+              this.newCardIds[seat] = [];
+          }
+          this.newCardIds[seat].push(cardId);
+      };
+      
+      switch (type) {
+          case SkillCardType.DrawTwo: {
+              // 无中生有: Get 2 random cards
+              const card1 = this.generateRandomCard();
+              const card2 = this.generateRandomCard();
+              this.hands[user].push(card1, card2);
+              this.hands[user] = sortCards(this.hands[user], this.level);
+              trackNewCard(user, card1.id);
+              trackNewCard(user, card2.id);
+              this.io.to(this.roomId).emit('error', `${playerName} 使用了【无中生有】，获得2张牌！`);
+              return true;
+          }
+          
+          case SkillCardType.Steal: {
+              // 顺手牵羊: Steal 1 random card from target
+              if (target === undefined || this.hands[target].length === 0) return false;
+              const targetHand = this.hands[target];
+              const randIdx = Math.floor(Math.random() * targetHand.length);
+              const stolenCard = targetHand.splice(randIdx, 1)[0];
+              this.hands[user].push(stolenCard);
+              this.hands[user] = sortCards(this.hands[user], this.level);
+              trackNewCard(user, stolenCard.id);
+              this.io.to(this.roomId).emit('error', `${playerName} 对 ${targetName} 使用了【顺手牵羊】！`);
+              return true;
+          }
+          
+          case SkillCardType.Discard: {
+              // 过河拆桥: Target discards 1 random card
+              if (target === undefined || this.hands[target].length === 0) return false;
+              const targetHand = this.hands[target];
+              const randIdx = Math.floor(Math.random() * targetHand.length);
+              targetHand.splice(randIdx, 1);
+              this.io.to(this.roomId).emit('error', `${playerName} 对 ${targetName} 使用了【过河拆桥】！`);
+              return true;
+          }
+          
+          case SkillCardType.Skip: {
+              // 乐不思蜀: Target skips next turn
+              if (target === undefined) return false;
+              this.skipNextTurn[target] = true;
+              this.io.to(this.roomId).emit('error', `${playerName} 对 ${targetName} 使用了【乐不思蜀】！下回合将被跳过！`);
+              return true;
+          }
+          
+          case SkillCardType.Harvest: {
+              // 五谷丰登: All active players get 1 random card
+              const activePlayers = [0, 1, 2, 3].filter(i => this.hands[i].length > 0);
+              activePlayers.forEach(seat => {
+                  const card = this.generateRandomCard();
+                  this.hands[seat].push(card);
+                  this.hands[seat] = sortCards(this.hands[seat], this.level);
+                  trackNewCard(seat, card.id);
+              });
+              this.io.to(this.roomId).emit('error', `${playerName} 使用了【五谷丰登】，每人获得1张牌！`);
+              return true;
+          }
+          
+          default:
+              return false;
+      }
+  }
+  
+  // ==================== END SKILL CARD METHODS ====================
   
   endGame() {
       console.log(`[endGame] Game ended. Winners: ${this.winners.join(', ')}`);
@@ -579,10 +796,19 @@ export class Game {
                 winners: this.winners,
                 tributeState: this.currentPhase === GamePhase.Tribute || this.currentPhase === GamePhase.ReturnTribute ? this.tributeState : undefined,
                 teamLevels: this.teamLevels,
-                activeTeam: this.activeTeam
+                activeTeam: this.activeTeam,
+                // Skill mode data
+                gameMode: this.gameMode,
+                mySkillCards: this.skillCards[idx],  // Only send player's own skill cards
+                skipNextTurn: this.skipNextTurn,
+                // New cards highlight
+                newCardIds: this.newCardIds[idx] || []
             });
         }
     });
+    
+    // Clear new card IDs after broadcasting (they only need to be shown once)
+    this.newCardIds = {};
     
     // Bot Turn Logic
     const currentPlayer = this.players[this.currentTurn];
@@ -617,6 +843,18 @@ export class Game {
           return;
       }
       
+      // In Skill mode, bot may use a skill first
+      if (this.gameMode === GameMode.Skill && this.skillCards[seatIndex].length > 0) {
+          const skillDecision = this.decideBotSkillUse(seatIndex);
+          if (skillDecision) {
+              console.log(`[Bot] Seat ${seatIndex} decides to use skill: ${skillDecision.skill.type}`);
+              this.handleUseSkill(seatIndex, skillDecision.skill.id, skillDecision.target);
+              // After using skill, schedule another bot turn for playing cards
+              setTimeout(() => this.handleBotTurn(seatIndex), 1000);
+              return;
+          }
+      }
+      
       const bot = new Bot(hand, this.level);
       const move = bot.decideMove(this.lastHand ? this.lastHand.hand : null);
       
@@ -627,5 +865,82 @@ export class Game {
       } else {
           this.handlePass(seatIndex);
       }
+  }
+  
+  decideBotSkillUse(seatIndex: number): { skill: SkillCard, target?: number } | null {
+      const mySkills = this.skillCards[seatIndex];
+      if (mySkills.length === 0) return null;
+      
+      const myTeam = seatIndex % 2;
+      const teammates = [0, 1, 2, 3].filter(i => i % 2 === myTeam && i !== seatIndex && this.hands[i].length > 0);
+      const opponents = [0, 1, 2, 3].filter(i => i % 2 !== myTeam && this.hands[i].length > 0);
+      const activePlayers = [0, 1, 2, 3].filter(i => this.hands[i].length > 0);
+      
+      const myHandSize = this.hands[seatIndex].length;
+      
+      // Strategy: Use skills based on situation
+      for (const skill of mySkills) {
+          switch (skill.type) {
+              case SkillCardType.DrawTwo:
+                  // Use if I have few cards (< 10)
+                  if (myHandSize < 10) {
+                      return { skill };
+                  }
+                  break;
+                  
+              case SkillCardType.Steal:
+                  // Steal from opponent with most cards
+                  if (opponents.length > 0) {
+                      const target = opponents.reduce((a, b) => 
+                          this.hands[a].length > this.hands[b].length ? a : b);
+                      if (this.hands[target].length > 5) {
+                          return { skill, target };
+                      }
+                  }
+                  break;
+                  
+              case SkillCardType.Discard:
+                  // Discard from opponent with few cards (close to winning)
+                  if (opponents.length > 0) {
+                      const target = opponents.find(o => this.hands[o].length <= 5 && this.hands[o].length > 0);
+                      if (target !== undefined) {
+                          return { skill, target };
+                      }
+                  }
+                  break;
+                  
+              case SkillCardType.Skip:
+                  // Skip opponent who is about to win
+                  if (opponents.length > 0) {
+                      const target = opponents.find(o => this.hands[o].length <= 3);
+                      if (target !== undefined) {
+                          return { skill, target };
+                      }
+                  }
+                  break;
+                  
+              case SkillCardType.Harvest:
+                  // Use if hand sizes are relatively balanced
+                  if (myHandSize < 15 && activePlayers.length >= 3) {
+                      return { skill };
+                  }
+                  break;
+          }
+      }
+      
+      // Randomly use a skill 20% of the time if we have one
+      if (Math.random() < 0.2 && mySkills.length > 0) {
+          const skill = mySkills[0];
+          if ([SkillCardType.DrawTwo, SkillCardType.Harvest].includes(skill.type)) {
+              return { skill };
+          }
+          if ([SkillCardType.Steal, SkillCardType.Discard, SkillCardType.Skip].includes(skill.type)) {
+              if (opponents.length > 0) {
+                  return { skill, target: opponents[0] };
+              }
+          }
+      }
+      
+      return null;
   }
 }

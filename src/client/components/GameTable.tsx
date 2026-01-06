@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Card as CardType, Rank, Suit } from '../../shared/types';
+import { Card as CardType, Rank, Suit, GameMode, SkillCard, SkillCardType } from '../../shared/types';
 import { Bot } from '../../shared/bot';
 import { Card } from './Card';
 import { GameState, RoomState } from '../useGame';
 import { getLogicValue, isConsecutive } from '../../shared/rules';
+import { SkillCardButton } from './SkillCardButton';
+import { TargetSelectModal } from './TargetSelectModal';
 
 interface Props {
-  gameState: GameState;
+  gameState: GameState | null;
   roomState: RoomState;
   mySeat: number;
   onPlay: (cards: CardType[]) => void;
@@ -18,16 +20,45 @@ interface Props {
   chatMessages: {sender: string, text: string, time: string}[];
   onSendChat: (msg: string) => void;
   onSwitchSeat: (seatIdx: number) => void;
+  onSetGameMode?: (mode: GameMode) => void;
+  onUseSkill?: (skillId: string, targetSeat?: number) => void;
 }
 
 export const GameTable: React.FC<Props> = ({ 
   gameState, roomState, mySeat, onPlay, onPass, onReady, onStart,
-  onTribute, onReturnTribute, chatMessages, onSendChat, onSwitchSeat
+  onTribute, onReturnTribute, chatMessages, onSendChat, onSwitchSeat,
+  onSetGameMode, onUseSkill
 }) => {
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [viewMode, setViewMode] = useState<'normal' | 'stacked'>('normal'); 
   const chatEndRef = useRef<HTMLDivElement>(null);
+  
+  // Skill card state
+  const [pendingSkill, setPendingSkill] = useState<SkillCard | null>(null);
+  const [showTargetSelect, setShowTargetSelect] = useState(false);
+  
+  // New card highlight state
+  const [highlightedCardIds, setHighlightedCardIds] = useState<Set<string>>(new Set());
+  
+  // Track new cards and set up highlight timer
+  useEffect(() => {
+      if (gameState?.newCardIds && gameState.newCardIds.length > 0) {
+          const newIds = new Set(gameState.newCardIds);
+          setHighlightedCardIds(prev => new Set([...prev, ...newIds]));
+          
+          // Clear highlight after 3 seconds
+          const timer = setTimeout(() => {
+              setHighlightedCardIds(prev => {
+                  const updated = new Set(prev);
+                  gameState.newCardIds!.forEach(id => updated.delete(id));
+                  return updated;
+              });
+          }, 3000);
+          
+          return () => clearTimeout(timer);
+      }
+  }, [gameState?.newCardIds]);
   
   // Auto-scroll chat
   useEffect(() => {
@@ -158,6 +189,46 @@ export const GameTable: React.FC<Props> = ({
           setChatInput('');
       }
   }
+  
+  // Skill card handlers
+  const handleSkillClick = (skill: SkillCard) => {
+      const needsTarget = [SkillCardType.Steal, SkillCardType.Discard, SkillCardType.Skip];
+      if (needsTarget.includes(skill.type)) {
+          setPendingSkill(skill);
+          setShowTargetSelect(true);
+      } else {
+          // No target needed, use immediately
+          onUseSkill?.(skill.id);
+      }
+  };
+  
+  const handleTargetSelect = (targetSeat: number) => {
+      if (pendingSkill) {
+          onUseSkill?.(pendingSkill.id, targetSeat);
+          setPendingSkill(null);
+          setShowTargetSelect(false);
+      }
+  };
+  
+  const handleTargetCancel = () => {
+      setPendingSkill(null);
+      setShowTargetSelect(false);
+  };
+  
+  // Get players for target selection
+  const getPlayersForTargeting = () => {
+      return roomState.players
+          .filter((p): p is NonNullable<typeof p> => p !== null)
+          .map(p => ({
+              name: p.name,
+              seatIndex: p.seatIndex,
+              handCount: gameState 
+                  ? (typeof gameState.hands[p.seatIndex] === 'number' 
+                      ? gameState.hands[p.seatIndex] as number 
+                      : (gameState.hands[p.seatIndex] as CardType[]).length)
+                  : 0
+          }));
+  };
 
   const isTributePhase = gameState && (gameState.phase === 'Tribute' || gameState.phase === 'ReturnTribute');
   const amIPaying = isTributePhase && gameState.tributeState && (
@@ -326,8 +397,39 @@ export const GameTable: React.FC<Props> = ({
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
         {renderLastHand()}
         {!gameState && (
-            <div className="flex flex-col gap-4 mt-8">
+            <div className="flex flex-col gap-4 mt-8 items-center">
                <div className="text-white text-xl">Waiting for players...</div>
+               
+               {/* Game Mode Toggle - Only host can change */}
+               <div className="flex items-center gap-4 bg-[#252526] px-4 py-2 rounded-lg border border-[#333333]">
+                   <span className="text-[#9cdcfe] font-bold">模式:</span>
+                   <button 
+                       onClick={() => onSetGameMode?.(GameMode.Normal)}
+                       disabled={mySeat !== 0}
+                       className={`px-4 py-1 rounded font-bold transition-all ${
+                           roomState.gameMode !== GameMode.Skill 
+                               ? 'bg-blue-600 text-white' 
+                               : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                       } ${mySeat !== 0 ? 'cursor-not-allowed opacity-70' : ''}`}
+                   >
+                       普通
+                   </button>
+                   <button 
+                       onClick={() => onSetGameMode?.(GameMode.Skill)}
+                       disabled={mySeat !== 0}
+                       className={`px-4 py-1 rounded font-bold transition-all ${
+                           roomState.gameMode === GameMode.Skill 
+                               ? 'bg-purple-600 text-white' 
+                               : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                       } ${mySeat !== 0 ? 'cursor-not-allowed opacity-70' : ''}`}
+                   >
+                       技能
+                   </button>
+               </div>
+               {roomState.gameMode === GameMode.Skill && (
+                   <div className="text-purple-400 text-sm">技能模式: 每人开局获得2张技能卡</div>
+               )}
+               
                {me.player && !me.player.isReady && (
                    <button onClick={onReady} className="bg-blue-500 text-white px-6 py-2 rounded font-bold">准备</button>
                )}
@@ -346,6 +448,26 @@ export const GameTable: React.FC<Props> = ({
             </div>
         )}
         
+        {/* Skill Cards Area */}
+        {gameState && gameState.gameMode === GameMode.Skill && gameState.mySkillCards && gameState.mySkillCards.length > 0 && (
+            <div className="mb-4 pointer-events-auto flex flex-col items-center">
+                <div className="text-purple-400 text-sm mb-2 font-bold">我的技能卡</div>
+                <div className="flex gap-3">
+                    {gameState.mySkillCards.map((skill) => (
+                        <SkillCardButton 
+                            key={skill.id} 
+                            skill={skill} 
+                            onClick={() => handleSkillClick(skill)}
+                            disabled={gameState.currentTurn !== mySeat || gameState.phase !== 'Playing'}
+                        />
+                    ))}
+                </div>
+                {gameState.currentTurn === mySeat && gameState.phase === 'Playing' && (
+                    <div className="text-xs text-gray-400 mt-1">点击技能卡使用（使用后仍可出牌）</div>
+                )}
+            </div>
+        )}
+
         {/* Controls Container */}
         <div className="mb-8 pointer-events-auto">
             {gameState && gameState.currentTurn === mySeat && gameState.phase === 'Playing' && (
@@ -403,6 +525,7 @@ export const GameTable: React.FC<Props> = ({
                   card={card} 
                   selected={selectedCardIds.includes(card.id)}
                   onClick={() => toggleSelect(card.id)}
+                  isHighlighted={highlightedCardIds.has(card.id)}
                 />
               ))
           ) : (
@@ -427,6 +550,7 @@ export const GameTable: React.FC<Props> = ({
                                     selected={selectedCardIds.includes(card.id)}
                                     onClick={() => toggleSelect(card.id)}
                                     small 
+                                    isHighlighted={highlightedCardIds.has(card.id)}
                                 />
                               </div>
                           ));
@@ -451,6 +575,17 @@ export const GameTable: React.FC<Props> = ({
                   下一局 / 升级 (Host Only)
               </button>
           </div>
+      )}
+      
+      {/* Target Selection Modal for Skills */}
+      {showTargetSelect && pendingSkill && (
+          <TargetSelectModal
+              skillType={pendingSkill.type}
+              players={getPlayersForTargeting()}
+              mySeat={mySeat}
+              onSelect={handleTargetSelect}
+              onCancel={handleTargetCancel}
+          />
       )}
     </div>
   );

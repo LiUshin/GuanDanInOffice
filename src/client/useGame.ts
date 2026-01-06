@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { socket } from './socket';
-import { Card } from '../shared/types';
+import { Card, GameMode, SkillCard } from '../shared/types';
 
 export interface GameState {
   phase: string;
@@ -16,11 +16,18 @@ export interface GameState {
   };
   teamLevels?: { [key: number]: number };
   activeTeam?: number;
+  // Skill mode fields
+  gameMode?: GameMode;
+  mySkillCards?: SkillCard[];
+  skipNextTurn?: boolean[];
+  // New cards to highlight
+  newCardIds?: string[];
 }
 
 export interface RoomState {
   roomId: string;
   players: ({ name: string, seatIndex: number, isReady: boolean } | null)[];
+  gameMode?: GameMode;
 }
 
 export function useGame() {
@@ -104,6 +111,14 @@ export function useGame() {
   const switchSeat = (seatIdx: number) => {
       socket.emit('switchSeat', seatIdx);
   }
+  
+  const setGameMode = (mode: GameMode) => {
+      socket.emit('setGameMode', mode);
+  }
+  
+  const useSkill = (skillId: string, targetSeat?: number) => {
+      socket.emit('useSkill', { skillId, targetSeat });
+  }
 
   return {
     inRoom,
@@ -113,6 +128,6 @@ export function useGame() {
     setMySeat,
     error,
     chatMessages,
-    actions: { joinRoom, setReady, playHand, passTurn, startGame, payTribute, returnTribute, sendChat, switchSeat }
+    actions: { joinRoom, setReady, playHand, passTurn, startGame, payTribute, returnTribute, sendChat, switchSeat, setGameMode, useSkill }
   };
 }

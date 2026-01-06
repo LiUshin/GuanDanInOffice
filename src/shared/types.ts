@@ -51,3 +51,32 @@ export interface Hand {
   value: number; 
   bombCount?: number;
 }
+
+// Game Mode
+export enum GameMode {
+  Normal = 'Normal',
+  Skill = 'Skill'
+}
+
+// Skill Card Types
+export enum SkillCardType {
+  DrawTwo = 'DrawTwo',           // 无中生有：获得随机两张牌
+  Steal = 'Steal',               // 顺手牵羊：从目标玩家随机获得一张牌
+  Discard = 'Discard',           // 过河拆桥：让目标玩家随机弃一张牌
+  Skip = 'Skip',                 // 乐不思蜀：让目标玩家下回合跳过
+  Harvest = 'Harvest'            // 五谷丰登：每个玩家各获得一张随机牌
+}
+
+export interface SkillCard {
+  id: string;
+  type: SkillCardType;
+}
+
+// Skill card display names
+export const SkillCardNames: { [key in SkillCardType]: string } = {
+  [SkillCardType.DrawTwo]: '无中生有',
+  [SkillCardType.Steal]: '顺手牵羊',
+  [SkillCardType.Discard]: '过河拆桥',
+  [SkillCardType.Skip]: '乐不思蜀',
+  [SkillCardType.Harvest]: '五谷丰登'
+};

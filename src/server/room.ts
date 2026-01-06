@@ -1,5 +1,6 @@
 import { Server, Socket } from 'socket.io';
 import { Game } from './game';
+import { GameMode } from '../shared/types';
 
 interface Player {
   id: string; // Socket ID (Current)
@@ -40,6 +41,7 @@ class Room {
   io: Server;
   players: (Player | null)[] = [null, null, null, null];
   game: Game | null = null;
+  gameMode: GameMode = GameMode.Normal;
 
   constructor(id: string, io: Server) {
     this.id = id;
@@ -128,6 +130,24 @@ class Room {
     
     socket.on('chatMessage', (msg: string) => this.handleChat(socket, msg));
     socket.on('switchSeat', (targetSeat: number) => this.switchSeat(socket, targetSeat));
+    socket.on('setGameMode', (mode: GameMode) => this.setGameMode(socket, mode));
+  }
+  
+  setGameMode(socket: Socket, mode: GameMode) {
+      // Only host (seat 0) can change game mode
+      const idx = this.getSeat(socket);
+      if (idx !== 0) {
+          socket.emit('error', '只有房主可以切换游戏模式');
+          return;
+      }
+      // Can only change before game starts
+      if (this.game) {
+          socket.emit('error', '游戏进行中无法切换模式');
+          return;
+      }
+      this.gameMode = mode;
+      this.io.to(this.id).emit('error', `游戏模式已切换为: ${mode === GameMode.Skill ? '技能模式' : '普通模式'}`);
+      this.broadcastState();
   }
 
   handleChat(socket: Socket, msg: string) {
@@ -232,13 +252,13 @@ class Room {
       this.broadcastState();
 
       if (!this.game) {
-          this.game = new Game(this.io, this.id, gamePlayers);
+          this.game = new Game(this.io, this.id, gamePlayers, this.gameMode);
           this.game.start();
       } else {
           // Restart - Preserve State
           const prevWinners = this.game.prevWinners.length > 0 ? this.game.prevWinners : [];
           const oldGame = this.game;
-          this.game = new Game(this.io, this.id, gamePlayers);
+          this.game = new Game(this.io, this.id, gamePlayers, this.gameMode);
           this.game.teamLevels = oldGame.teamLevels;
           this.game.activeTeam = oldGame.activeTeam;
           this.game.prevWinners = prevWinners;
@@ -252,7 +272,8 @@ class Room {
     const playerList = this.players.map(p => p ? { id: p.id, name: p.name, seatIndex: p.seatIndex, isReady: p.isReady, isBot: p.isBot } : null);
     this.io.to(this.id).emit('roomState', {
       roomId: this.id,
-      players: playerList
+      players: playerList,
+      gameMode: this.gameMode
     });
   }
 }
