@@ -1,17 +1,34 @@
-# GuanDan Game - Docker Image
-FROM node:18-alpine
+# Build Stage
+FROM node:18-alpine AS builder
 
-# Set working directory
 WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
+# Install ALL dependencies (including devDependencies for build)
+RUN npm install
+
+# Copy source code
+COPY . .
+
+# Build the application
+RUN npm run build
+
+# Production Stage
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install ONLY production dependencies
 RUN npm ci --only=production
 
-# Copy built files
-COPY dist ./dist
+# Copy built files from builder stage
+COPY --from=builder /app/dist ./dist
+# Copy public assets if any (assuming they are in dist or handled by build)
 
 # Expose port
 EXPOSE 3000
