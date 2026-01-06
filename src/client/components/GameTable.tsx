@@ -22,12 +22,13 @@ interface Props {
   onSwitchSeat: (seatIdx: number) => void;
   onSetGameMode?: (mode: GameMode) => void;
   onUseSkill?: (skillId: string, targetSeat?: number) => void;
+  onForceEndGame?: () => void;
 }
 
 export const GameTable: React.FC<Props> = ({ 
   gameState, roomState, mySeat, onPlay, onPass, onReady, onStart,
   onTribute, onReturnTribute, chatMessages, onSendChat, onSwitchSeat,
-  onSetGameMode, onUseSkill
+  onSetGameMode, onUseSkill, onForceEndGame
 }) => {
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState('');
@@ -461,8 +462,24 @@ export const GameTable: React.FC<Props> = ({
       </div>
 
       {gameState && (
-          <div className="absolute top-4 left-4 text-[#d4d4d4] font-bold text-xl bg-[#252526] border border-[#333333] px-4 py-2 rounded shadow-lg">
-              <span className="text-[#569cd6]">const</span> <span className="text-[#9cdcfe]">Level</span> = <span className="text-[#b5cea8]">{gameState.level}</span>;
+          <div className="absolute top-4 left-4 flex flex-col gap-2 items-start z-50">
+              <div className="text-[#d4d4d4] font-bold text-xl bg-[#252526] border border-[#333333] px-4 py-2 rounded shadow-lg">
+                  <span className="text-[#569cd6]">const</span> <span className="text-[#9cdcfe]">Level</span> = <span className="text-[#b5cea8]">{gameState.level}</span>;
+              </div>
+              
+              {/* Host Force End Button */}
+              {me.player && me.player.seatIndex === 0 && (
+                <button 
+                    onClick={() => {
+                        if (confirm('⚠️ 确定要强制结束当前游戏吗？所有进度将丢失。')) {
+                            onForceEndGame?.();
+                        }
+                    }}
+                    className="bg-red-900/80 hover:bg-red-600 text-white text-xs px-3 py-1 rounded border border-red-500/50 shadow-lg backdrop-blur-sm transition-all flex items-center gap-1"
+                >
+                    <span>⛔</span> 强制结束
+                </button>
+              )}
           </div>
       )}
       

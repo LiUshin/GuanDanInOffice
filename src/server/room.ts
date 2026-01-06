@@ -131,8 +131,45 @@ class Room {
     socket.on('chatMessage', (msg: string) => this.handleChat(socket, msg));
     socket.on('switchSeat', (targetSeat: number) => this.switchSeat(socket, targetSeat));
     socket.on('setGameMode', (mode: GameMode) => this.setGameMode(socket, mode));
+    socket.on('forceEndGame', () => this.handleForceEnd(socket));
   }
   
+  handleForceEnd(socket: Socket) {
+      const seat = this.getSeat(socket);
+      // Only Host (Seat 0) can force end
+      if (seat !== 0) {
+          socket.emit('error', '只有房主可以强制结束游戏');
+          return;
+      }
+      
+      if (!this.game) {
+          socket.emit('error', '当前没有正在进行的游戏');
+          return;
+      }
+      
+      console.log(`[Room ${this.id}] Host forced end game.`);
+      
+      // Stop the game
+      this.game = null;
+      
+      // Reset players ready status
+      this.players.forEach(p => {
+          if (p) {
+              p.isReady = false;
+          }
+      });
+      
+      // Notify everyone
+      this.io.to(this.id).emit('error', '房主强制结束了游戏');
+      // Emit a special "gameTerminated" or just let the roomState update handle it?
+      // The client relies on `gameState` event to enter game view. 
+      // If we stop emitting gameState, client might get stuck if it doesn't know game ended.
+      // We should emit a null gameState or explicit termination signal.
+      
+      this.io.to(this.id).emit('gameTerminated'); 
+      this.broadcastState();
+  }
+
   setGameMode(socket: Socket, mode: GameMode) {
       // Only host (seat 0) can change game mode
       const idx = this.getSeat(socket);

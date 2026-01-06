@@ -68,11 +68,17 @@ export function useGame() {
       // This event is just a confirmation
     });
 
+    socket.on('gameTerminated', () => {
+        console.log('[Client] Game Terminated by Host');
+        setGameState(null); // Clear game state to return to lobby
+    });
+
     return () => {
       socket.off('roomState');
       socket.off('gameState');
       socket.off('error');
       socket.off('gameOver');
+      socket.off('gameTerminated');
     };
   }, []);
 
@@ -120,6 +126,10 @@ export function useGame() {
       socket.emit('useSkill', { skillId, targetSeat });
   }
 
+  const forceEndGame = () => {
+      socket.emit('forceEndGame');
+  }
+
   return {
     inRoom,
     roomState,
@@ -128,6 +138,6 @@ export function useGame() {
     setMySeat,
     error,
     chatMessages,
-    actions: { joinRoom, setReady, playHand, passTurn, startGame, payTribute, returnTribute, sendChat, switchSeat, setGameMode, useSkill }
+    actions: { joinRoom, setReady, playHand, passTurn, startGame, payTribute, returnTribute, sendChat, switchSeat, setGameMode, useSkill, forceEndGame }
   };
 }
