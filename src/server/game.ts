@@ -493,6 +493,41 @@ export class Game {
       this.broadcastGameState();
   }
   
+  // Helper to end current round and find next start player
+  endRoundAndFindNext(winner: number) {
+      console.log(`[endRound] Round ended. Winner: ${winner}`);
+      
+      // JieFeng Logic: If winner has no cards, partner leads
+      if (this.hands[winner].length === 0) {
+          console.log(`[endRound] Winner ${winner} has no cards. Partner接风.`);
+          winner = (winner + 2) % 4;
+      }
+
+      this.lastHand = null;
+      this.passCount = 0; // Deprecated but kept for compatibility
+      this.roundActions = {}; 
+
+      // If the designated starter (e.g. partner) also has no cards, pass to next
+      const order = [winner, (winner + 1) % 4, (winner + 2) % 4, (winner + 3) % 4];
+      let found = false;
+      for (const seat of order) {
+          if (this.hands[seat].length > 0) {
+              this.currentTurn = seat;
+              found = true;
+              console.log(`[endRound] Next turn goes to seat ${seat}`);
+              break;
+          }
+      }
+      
+      if (!found) {
+          console.log('[endRound] All players finished, ending game');
+          this.endGame();
+          return;
+      }
+      
+      this.broadcastGameState();
+  }
+
   handlePass(seatIndex: number) {
       if (this.currentPhase !== GamePhase.Playing) return;
       if (this.currentTurn !== seatIndex) return;
@@ -502,47 +537,8 @@ export class Game {
           return;
       }
       
-      this.passCount++;
       this.roundActions[seatIndex] = { type: 'pass' };
-      
-      // Calculate how many active players (those with cards) remain
-      const activePlayers = this.hands.filter(h => h.length > 0).length;
-      // All OTHER active players must pass for the round to reset
-      // (activePlayers - 1) because the last player who played doesn't pass on themselves
-      const passThreshold = activePlayers - 1;
-      
-      console.log(`[handlePass] Player ${seatIndex} passed. passCount=${this.passCount}, activePlayers=${activePlayers}, threshold=${passThreshold}`);
-      
-      if (this.passCount >= passThreshold) {
-          // All other active players passed, turn goes back to last player who played
-          console.log(`[handlePass] All others passed. Returning to player ${this.lastHand!.playerIndex}`);
-          let nextTurn = this.lastHand!.playerIndex;
-          this.lastHand = null;
-          this.passCount = 0;
-          
-          // Find next player with cards (could be partner or opponent)
-          // Priority: self > partner > next opponent > last opponent
-          const order = [nextTurn, (nextTurn + 2) % 4, (nextTurn + 1) % 4, (nextTurn + 3) % 4];
-          let found = false;
-          for (const seat of order) {
-              if (this.hands[seat].length > 0) {
-                  this.currentTurn = seat;
-                  found = true;
-                  console.log(`[handlePass] Next turn goes to seat ${seat}`);
-                  break;
-              }
-          }
-          
-          if (!found) {
-              // All finished? Should not happen normally, but end game just in case.
-              console.log('[handlePass] All players finished, ending game');
-              this.endGame();
-              return;
-          }
-          
-          this.broadcastGameState();
-          return;
-      }
+      console.log(`[handlePass] Player ${seatIndex} passed.`);
       
       this.advanceTurn();
       this.broadcastGameState();
@@ -551,32 +547,45 @@ export class Game {
   advanceTurn() {
       const prevTurn = this.currentTurn;
       let next = (this.currentTurn + 1) % 4;
-      let count = 0;
-      // Skip finished players AND players affected by 乐不思蜀
-      while (count < 4) {
-          if (this.hands[next].length === 0) {
+      
+      // Look ahead up to 4 times to find next valid player
+      for (let i = 0; i < 4; i++) {
+          // Check if we cycled back to the round winner (or their seat)
+          if (this.lastHand && next === this.lastHand.playerIndex) {
+               console.log(`[advanceTurn] Cycled back to last player ${next}. Round End.`);
+               this.endRoundAndFindNext(next);
+               return;
+          }
+
+          const isFinished = this.hands[next].length === 0;
+          const isSkipped = this.skipNextTurn[next];
+          
+          if (isFinished) {
               console.log(`[advanceTurn] Skipping seat ${next} (no cards)`);
               next = (next + 1) % 4;
-              count++;
               continue;
           }
-          if (this.skipNextTurn[next]) {
+          
+          if (isSkipped) {
               console.log(`[advanceTurn] Skipping seat ${next} (乐不思蜀 effect)`);
-              this.skipNextTurn[next] = false; // Clear the skip flag after using it
+              this.skipNextTurn[next] = false;
               this.io.to(this.roomId).emit('error', `${this.players[next].name} 被【乐不思蜀】跳过了回合！`);
+              this.roundActions[next] = { type: 'pass' }; // Visually show pass
+              
+              // After skipping, check round end condition again for the NEXT player
+              // But easiest is just to loop again
               next = (next + 1) % 4;
-              count++;
               continue;
           }
-          break;
-      }
-      if (count === 4) {
-          console.log(`[advanceTurn] All players finished or skipped, ending game`);
-          this.endGame();
+          
+          // Found valid player
+          this.currentTurn = next;
+          console.log(`[advanceTurn] Turn changed: ${prevTurn} -> ${next}.`);
           return;
       }
-      this.currentTurn = next;
-      console.log(`[advanceTurn] Turn changed: ${prevTurn} -> ${next}. Player ${next} has ${this.hands[next].length} cards.`);
+      
+      // If we exit loop, everyone is finished?
+      this.endGame();
   }
   
   // ==================== SKILL CARD METHODS ====================
