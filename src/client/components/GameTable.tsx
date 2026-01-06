@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Card as CardType, Rank, Suit, GameMode, SkillCard, SkillCardType } from '../../shared/types';
+import { Card as CardType, Rank, Suit, GameMode, SkillCard, SkillCardType, Hand } from '../../shared/types';
 import { Bot } from '../../shared/bot';
 import { Card } from './Card';
 import { GameState, RoomState } from '../useGame';
-import { getLogicValue, isConsecutive } from '../../shared/rules';
+import { getLogicValue, isConsecutive, getAllPossibleHandTypes, getHandDescription } from '../../shared/rules';
 import { SkillCardButton } from './SkillCardButton';
 import { TargetSelectModal } from './TargetSelectModal';
 
@@ -11,7 +11,7 @@ interface Props {
   gameState: GameState | null;
   roomState: RoomState;
   mySeat: number;
-  onPlay: (cards: CardType[]) => void;
+  onPlay: (cards: CardType[], handType?: Hand) => void;
   onPass: () => void;
   onReady: () => void;
   onStart: () => void;
@@ -48,6 +48,10 @@ export const GameTable: React.FC<Props> = ({
   
   // Chat bubble state for each seat (seat -> message)
   const [chatBubbles, setChatBubbles] = useState<{ [seat: number]: string }>({});
+  
+  // Hand type selection state (for wild cards with multiple interpretations)
+  const [possibleHands, setPossibleHands] = useState<Hand[]>([]);
+  const [showHandSelector, setShowHandSelector] = useState(false);
   
   // Track new cards and set up highlight timer
   useEffect(() => {
@@ -187,8 +191,38 @@ export const GameTable: React.FC<Props> = ({
 
   const handlePlay = () => {
     const cards = sortedHand.filter(c => selectedCardIds.includes(c.id));
+    
+    // Check if cards contain wild cards
+    const hasWild = cards.some(c => c.isWild);
+    
+    if (hasWild && gameState) {
+      // Get all possible hand types
+      const possibilities = getAllPossibleHandTypes(cards, gameState.level);
+      
+      if (possibilities.length > 1) {
+        // Multiple interpretations - show selector
+        setPossibleHands(possibilities);
+        setShowHandSelector(true);
+        return;
+      } else if (possibilities.length === 1) {
+        // Single interpretation - play directly
+        onPlay(cards, possibilities[0]);
+        setSelectedCardIds([]);
+        return;
+      }
+    }
+    
+    // No wild cards or no valid interpretation - play as normal
     onPlay(cards);
     setSelectedCardIds([]);
+  };
+  
+  const handleHandTypeSelect = (hand: Hand) => {
+    const cards = sortedHand.filter(c => selectedCardIds.includes(c.id));
+    onPlay(cards, hand);
+    setSelectedCardIds([]);
+    setShowHandSelector(false);
+    setPossibleHands([]);
   };
   
   const handleHint = () => {
@@ -674,6 +708,40 @@ export const GameTable: React.FC<Props> = ({
               <button onClick={onStart} className="mt-8 bg-white text-black px-6 py-2 rounded font-bold hover:bg-gray-200">
                   下一局 / 升级 (Host Only)
               </button>
+          </div>
+      )}
+      
+      {/* Hand Type Selection Modal (for wild cards) */}
+      {showHandSelector && possibleHands.length > 0 && gameState && (
+          <div className="absolute inset-0 bg-black/80 flex items-center justify-center z-50">
+              <div className="bg-[#252526] border border-[#333333] rounded-lg p-6 max-w-md shadow-2xl">
+                  <h2 className="text-2xl font-bold text-[#9cdcfe] mb-4">选择牌型</h2>
+                  <p className="text-gray-400 mb-4">您的牌包含红心{gameState.level}（万能牌），可以组成以下牌型：</p>
+                  <div className="flex flex-col gap-3">
+                      {possibleHands.map((hand, idx) => (
+                          <button
+                              key={idx}
+                              onClick={() => handleHandTypeSelect(hand)}
+                              className="bg-[#3c3c3c] hover:bg-[#4c4c4c] text-white px-6 py-3 rounded-lg font-bold transition-colors text-left"
+                          >
+                              <div className="text-lg">{getHandDescription(hand, gameState.level)}</div>
+                              <div className="text-sm text-gray-400 mt-1">
+                                  {hand.type} - 值: {hand.value}
+                                  {hand.bombCount && ` (${hand.bombCount}张炸弹)`}
+                              </div>
+                          </button>
+                      ))}
+                  </div>
+                  <button
+                      onClick={() => {
+                          setShowHandSelector(false);
+                          setPossibleHands([]);
+                      }}
+                      className="mt-4 w-full bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg"
+                  >
+                      取消
+                  </button>
+              </div>
           </div>
       )}
       

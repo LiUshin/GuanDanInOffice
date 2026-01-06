@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { socket } from './socket';
-import { Card, GameMode, SkillCard } from '../shared/types';
+import { Card, GameMode, SkillCard, Hand } from '../shared/types';
 
 export interface GameState {
   phase: string;
@@ -108,8 +108,8 @@ export function useGame() {
       socket.emit('start');
   }
 
-  const playHand = (cards: Card[]) => {
-    socket.emit('playHand', cards);
+  const playHand = (cards: Card[], handType?: Hand) => {
+    socket.emit('playHand', { cards, handType });
   };
 
   const passTurn = () => {

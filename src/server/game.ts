@@ -83,7 +83,14 @@ export class Game {
   bindPlayerListeners(p: Player) {
       if (!p.socket) return;
       const s = p.socket;
-      s.on('playHand', (cards: Card[]) => this.handlePlayHand(p.seatIndex, cards));
+      s.on('playHand', (data: { cards: Card[], handType?: Hand } | Card[]) => {
+          // Support both old format (Card[]) and new format ({ cards, handType })
+          if (Array.isArray(data)) {
+              this.handlePlayHand(p.seatIndex, data, undefined);
+          } else {
+              this.handlePlayHand(p.seatIndex, data.cards, data.handType);
+          }
+      });
       s.on('pass', () => this.handlePass(p.seatIndex));
       s.on('tribute', (cards: Card[]) => this.handleTribute(p.seatIndex, cards));
       s.on('returnTribute', (cards: Card[]) => this.handleReturnTribute(p.seatIndex, cards));
@@ -411,14 +418,27 @@ export class Game {
       }
   }
 
-  handlePlayHand(seatIndex: number, cards: Card[]) {
+  handlePlayHand(seatIndex: number, cards: Card[], providedHandType?: Hand) {
       if (this.currentPhase !== GamePhase.Playing) return;
       if (this.currentTurn !== seatIndex) return;
       
-      const hand = getHandType(cards, this.level);
-      if (!hand) {
-          this.emitError(seatIndex, 'Invalid hand');
-          return;
+      // Use provided hand type if available, otherwise infer it
+      let hand: Hand | null;
+      if (providedHandType) {
+          // Validate that the provided hand type is actually valid for these cards
+          const inferredHand = getHandType(cards, this.level);
+          if (!inferredHand) {
+              this.emitError(seatIndex, 'Invalid hand');
+              return;
+          }
+          // Use the provided interpretation
+          hand = providedHandType;
+      } else {
+          hand = getHandType(cards, this.level);
+          if (!hand) {
+              this.emitError(seatIndex, 'Invalid hand');
+              return;
+          }
       }
       
       // Debug Log

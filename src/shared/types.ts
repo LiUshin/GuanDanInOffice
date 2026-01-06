@@ -52,6 +52,13 @@ export interface Hand {
   bombCount?: number;
 }
 
+// Hand interpretation with wild card usage
+export interface HandInterpretation {
+  hand: Hand;
+  description: string; // Human-readable description of how wilds are used
+  wildUsage?: { [cardId: string]: { asRank: Rank, asSuit?: Suit } }; // How each wild is interpreted
+}
+
 // Game Mode
 export enum GameMode {
   Normal = 'Normal',
