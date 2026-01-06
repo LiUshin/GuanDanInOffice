@@ -35,6 +35,9 @@ export class Game {
   level: number = 2; 
   currentPhase: GamePhase = GamePhase.Waiting;
   
+  // Callback for when game ends (used by Match)
+  onGameEnd?: (winners: number[]) => void;
+  
   hands: Card[][] = [[], [], [], []];
   currentTurn: number = 0;
   
@@ -803,6 +806,11 @@ export class Game {
       
       // Then send gameOver event
       this.io.to(this.roomId).emit('gameOver', { winners: this.winners });
+      
+      // Call onGameEnd callback if set (used by Match)
+      if (this.onGameEnd) {
+          this.onGameEnd(this.winners);
+      }
   }
 
   emitError(seatIndex: number, msg: string) {

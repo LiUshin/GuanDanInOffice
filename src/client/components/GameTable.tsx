@@ -698,16 +698,24 @@ export const GameTable: React.FC<Props> = ({
       
       {gameState && gameState.phase === 'Score' && (
           <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center text-white z-50">
-              <h1 className="text-6xl font-bold mb-8 text-yellow-400">Game Over</h1>
-              <div className="text-2xl">
-                  Winners: {gameState.winners.map(w => {
+              <h1 className="text-6xl font-bold mb-8 text-yellow-400">本局结束</h1>
+              <div className="text-2xl mb-4">
+                  获胜顺序: {gameState.winners.map(w => {
                       const p = roomState.players.find(pl => pl && pl.seatIndex === w);
                       return p ? p.name : `Seat ${w}`;
-                  }).join(', ')}
+                  }).join(' → ')}
               </div>
-              <button onClick={onStart} className="mt-8 bg-white text-black px-6 py-2 rounded font-bold hover:bg-gray-200">
-                  下一局 / 升级 (Host Only)
-              </button>
+              {gameState.teamLevels && (
+                  <div className="text-xl text-gray-300 mb-4">
+                      当前等级 - 队伍0: {gameState.teamLevels[0]} | 队伍1: {gameState.teamLevels[1]}
+                  </div>
+              )}
+              <div className="text-lg text-yellow-300 animate-pulse">
+                  ⏳ 3秒后自动开始下一局...
+              </div>
+              <div className="text-sm text-gray-400 mt-4">
+                  (对局将持续到某队打到A并连胜两次)
+              </div>
           </div>
       )}
       

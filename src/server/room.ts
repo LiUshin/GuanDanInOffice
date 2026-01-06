@@ -1,8 +1,9 @@
 import { Server, Socket } from 'socket.io';
 import { Game } from './game';
+import { Match } from './match';
 import { GameMode } from '../shared/types';
 
-interface Player {
+export interface Player {
   id: string; // Socket ID (Current)
   name: string;
   socket?: Socket;
@@ -40,7 +41,7 @@ export class RoomManager {
       id: room.id,
       playerCount: room.players.filter(p => p !== null && !p.isDisconnected).length,
       maxPlayers: 4,
-      inGame: room.game !== null,
+      inGame: room.match !== null && room.match.currentGame !== null,
       gameMode: room.gameMode,
       hostName: room.players[0]?.name || 'Unknown'
     }));
@@ -57,7 +58,7 @@ class Room {
   id: string;
   io: Server;
   players: (Player | null)[] = [null, null, null, null];
-  game: Game | null = null;
+  match: Match | null = null; // Changed from game to match
   gameMode: GameMode = GameMode.Normal;
 
   constructor(id: string, io: Server) {
@@ -81,22 +82,23 @@ class Room {
         this.bindSocketListeners(socket, existingPlayerIndex);
         
         // If game is running, update game player ref?
-        if (this.game) {
-            this.game.players[existingPlayerIndex] = player;
+        if (this.match && this.match.currentGame) {
+            const game = this.match.currentGame;
+            game.players[existingPlayerIndex] = player;
             // Also need to re-bind game listeners!
-            this.game.rebindPlayer(player);
+            game.rebindPlayer(player);
             // Send current game state to reconnected player
             const p = player;
             socket.emit('gameState', {
-                phase: this.game.currentPhase,
-                level: this.game.level,
-                currentTurn: this.game.currentTurn,
-                hands: this.game.hands.map((h, i) => i === p.seatIndex ? h : h.length),
-                lastHand: this.game.lastHand,
-                winners: this.game.winners,
-                tributeState: this.game.currentPhase === 'Tribute' || this.game.currentPhase === 'ReturnTribute' ? this.game.tributeState : undefined,
-                teamLevels: this.game.teamLevels,
-                activeTeam: this.game.activeTeam
+                phase: (game as any).currentPhase,
+                level: game.level,
+                currentTurn: game.currentTurn,
+                hands: game.hands.map((h, i) => i === p.seatIndex ? h : h.length),
+                lastHand: game.lastHand,
+                winners: game.winners,
+                tributeState: (game as any).currentPhase === 'Tribute' || (game as any).currentPhase === 'ReturnTribute' ? game.tributeState : undefined,
+                teamLevels: game.teamLevels,
+                activeTeam: game.activeTeam
             });
         }
         
@@ -159,15 +161,16 @@ class Room {
           return;
       }
       
-      if (!this.game) {
-          socket.emit('error', '当前没有正在进行的游戏');
+      if (!this.match) {
+          socket.emit('error', '当前没有正在进行的对局');
           return;
       }
       
-      console.log(`[Room ${this.id}] Host forced end game.`);
+      console.log(`[Room ${this.id}] Host forced end match.`);
       
-      // Stop the game
-      this.game = null;
+      // Stop the match
+      this.match.forceEndMatch();
+      this.match = null;
       
       // Reset players ready status
       this.players.forEach(p => {
@@ -177,8 +180,8 @@ class Room {
       });
       
       // Notify everyone
-      this.io.to(this.id).emit('error', '房主强制结束了游戏');
-      // Emit a special "gameTerminated" or just let the roomState update handle it?
+      this.io.to(this.id).emit('error', '房主强制结束了对局');
+      // Emit a special "matchTerminated" or just let the roomState update handle it?
       // The client relies on `gameState` event to enter game view. 
       // If we stop emitting gameState, client might get stuck if it doesn't know game ended.
       // We should emit a null gameState or explicit termination signal.
@@ -194,9 +197,9 @@ class Room {
           socket.emit('error', '只有房主可以切换游戏模式');
           return;
       }
-      // Can only change before game starts
-      if (this.game) {
-          socket.emit('error', '游戏进行中无法切换模式');
+      // Can only change before match starts
+      if (this.match && this.match.matchWinner === null) {
+          socket.emit('error', '对局进行中无法切换模式');
           return;
       }
       this.gameMode = mode;
@@ -217,7 +220,7 @@ class Room {
   }
 
   switchSeat(socket: Socket, targetSeat: number) {
-      if (this.game) return; // Cannot switch during game
+      if (this.match && this.match.matchWinner === null) return; // Cannot switch during match
       if (targetSeat < 0 || targetSeat > 3) return;
       
       const currentIdx = this.players.findIndex(p => p && p.id === socket.id);
@@ -252,9 +255,9 @@ class Room {
       player.isReady = false; // Unready
       // player.socket = undefined; // Don't remove ref entirely? or optional?
       
-      // If game running, DO NOT end game immediately.
+      // If match running, DO NOT end match immediately.
       // Allow reconnect.
-      if (this.game) {
+      if (this.match && this.match.currentGame) {
           this.io.to(this.id).emit('error', `Player ${playerName} disconnected (Waiting for reconnect...)`);
       } else {
            // If game not started, just notify
@@ -278,7 +281,7 @@ class Room {
   
   tryAutoStart() {
       const readyCount = this.players.filter(p => p && p.isReady).length;
-      if (readyCount === 4 && !this.game) {
+      if (readyCount === 4 && !this.match) {
            this.startGame();
       }
   }
@@ -286,13 +289,12 @@ class Room {
   forceStart(seatIndex: number) {
       if (seatIndex !== 0) return; // Only host can force start
       
-      // Allow restart if game is in Score phase (ended)
-      if (this.game && (this.game as any).currentPhase !== 'Score') {
-          // Game is already running (not ended yet)
-          return;
+      // Don't allow starting if a match is already in progress
+      if (this.match && this.match.matchWinner === null) {
+          return; // Match is still ongoing
       }
       
-      // Start new game or restart after Score phase
+      // Start new match
       this.startGame();
   }
 
@@ -313,21 +315,11 @@ class Room {
       this.players = gamePlayers; // This commits bots to the room
       this.broadcastState();
 
-      if (!this.game) {
-          this.game = new Game(this.io, this.id, gamePlayers, this.gameMode);
-          this.game.start();
-      } else {
-          // Restart - Preserve State
-          const prevWinners = this.game.prevWinners.length > 0 ? this.game.prevWinners : [];
-          const oldGame = this.game;
-          this.game = new Game(this.io, this.id, gamePlayers, this.gameMode);
-          this.game.teamLevels = oldGame.teamLevels;
-          this.game.activeTeam = oldGame.activeTeam;
-          this.game.prevWinners = prevWinners;
-          
-          this.game.resetAndStart();
-      }
-      this.io.to(this.id).emit('gameStarted');
+      // Start a new match (full game series from 2 to A)
+      this.match = new Match(this.io, this.id, gamePlayers, this.gameMode);
+      this.match.startMatch();
+      
+      this.io.to(this.id).emit('matchStarted');
   }
 
   broadcastState() {

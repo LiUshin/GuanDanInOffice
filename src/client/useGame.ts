@@ -74,6 +74,13 @@ export function useGame() {
       console.log(`[Client] Game Over! Winners: ${data.winners.join(', ')}`);
       // The gameState should already be updated via broadcastGameState
       // This event is just a confirmation
+      // Note: Game will auto-restart after 3 seconds (handled by Match)
+    });
+    
+    socket.on('matchOver', (data: { winningTeam: number, winners: any[], finalLevels: any }) => {
+      console.log(`[Client] MATCH OVER! Team ${data.winningTeam} wins!`);
+      alert(`🎉 对局结束！\n获胜队伍：${data.winningTeam === 0 ? '0号和2号' : '1号和3号'}\n最终等级：${JSON.stringify(data.finalLevels)}`);
+      setGameState(null); // Clear game state to return to lobby
     });
 
     socket.on('gameTerminated', () => {
