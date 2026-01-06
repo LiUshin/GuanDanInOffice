@@ -285,11 +285,14 @@ class Room {
   
   forceStart(seatIndex: number) {
       if (seatIndex !== 0) return; // Only host can force start
-      if (this.game) return;
       
-      // Check if all *present* players are ready? 
-      // Or just assume if host says start, we start.
-      // Fill empty slots with bots.
+      // Allow restart if game is in Score phase (ended)
+      if (this.game && (this.game as any).currentPhase !== 'Score') {
+          // Game is already running (not ended yet)
+          return;
+      }
+      
+      // Start new game or restart after Score phase
       this.startGame();
   }
 
