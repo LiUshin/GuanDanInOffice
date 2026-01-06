@@ -17,7 +17,7 @@ interface Props {
   onStart: () => void;
   onTribute?: (cards: CardType[]) => void;
   onReturnTribute?: (cards: CardType[]) => void;
-  chatMessages: {sender: string, text: string, time: string}[];
+  chatMessages: {sender: string, text: string, time: string, seatIndex: number}[];
   onSendChat: (msg: string) => void;
   onSwitchSeat: (seatIdx: number) => void;
   onSetGameMode?: (mode: GameMode) => void;
@@ -33,6 +33,10 @@ export const GameTable: React.FC<Props> = ({
   const [chatInput, setChatInput] = useState('');
   const [viewMode, setViewMode] = useState<'normal' | 'stacked'>('normal'); 
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  
+  // Common emojis for quick selection
+  const quickEmojis = ['😀', '😂', '🤣', '😎', '🥳', '😭', '😡', '🤔', '👍', '👎', '❤️', '🔥', '💯', '🎉', '🤝', '✌️', '💪', '🙏', '😱', '🤯'];
   
   // Skill card state
   const [pendingSkill, setPendingSkill] = useState<SkillCard | null>(null);
@@ -40,6 +44,9 @@ export const GameTable: React.FC<Props> = ({
   
   // New card highlight state
   const [highlightedCardIds, setHighlightedCardIds] = useState<Set<string>>(new Set());
+  
+  // Chat bubble state for each seat (seat -> message)
+  const [chatBubbles, setChatBubbles] = useState<{ [seat: number]: string }>({});
   
   // Track new cards and set up highlight timer
   useEffect(() => {
@@ -59,6 +66,31 @@ export const GameTable: React.FC<Props> = ({
           return () => clearTimeout(timer);
       }
   }, [gameState?.newCardIds]);
+  
+  // Track chat messages and show bubbles
+  useEffect(() => {
+      if (chatMessages.length > 0) {
+          const lastMsg = chatMessages[chatMessages.length - 1];
+          if (lastMsg.seatIndex !== undefined) {
+              // Show bubble for this seat
+              setChatBubbles(prev => ({
+                  ...prev,
+                  [lastMsg.seatIndex]: lastMsg.text
+              }));
+              
+              // Clear bubble after 5 seconds
+              const timer = setTimeout(() => {
+                  setChatBubbles(prev => {
+                      const updated = { ...prev };
+                      delete updated[lastMsg.seatIndex];
+                      return updated;
+                  });
+              }, 5000);
+              
+              return () => clearTimeout(timer);
+          }
+      }
+  }, [chatMessages.length]);
   
   // Auto-scroll chat
   useEffect(() => {
@@ -273,12 +305,24 @@ export const GameTable: React.FC<Props> = ({
 
   const PlayerArea = ({ data, pos }: { data: any, pos: string }) => {
     const action = gameState?.roundActions?.[data.seat];
+    const bubble = chatBubbles[data.seat];
     
     return (
       <div 
           className={`absolute ${pos} flex flex-col items-center p-4 rounded-lg transition-colors ${data.isTeammate ? 'bg-blue-900/40 border-2 border-blue-400' : 'bg-black/20'} ${!gameState && !data.player ? 'cursor-pointer hover:bg-white/10' : ''}`}
           onClick={() => !gameState && !data.player && onSwitchSeat(data.seat)}
       >
+         {/* Chat Bubble */}
+         {bubble && (
+           <div className="absolute -top-16 left-1/2 -translate-x-1/2 z-50 animate-bounce-in">
+             <div className="relative bg-white text-gray-800 px-4 py-2 rounded-xl shadow-lg max-w-48 text-sm font-medium whitespace-pre-wrap">
+               {bubble}
+               {/* Bubble arrow */}
+               <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white"></div>
+             </div>
+           </div>
+         )}
+         
          <div className="w-12 h-12 bg-gray-300 rounded-full flex items-center justify-center mb-2 relative">
            {data.player ? data.player.name[0].toUpperCase() : (gameState ? '?' : '+')}
            {data.isTeammate && <div className="absolute -top-1 -right-1 bg-blue-500 text-xs text-white px-1 rounded">友</div>}
@@ -366,25 +410,53 @@ export const GameTable: React.FC<Props> = ({
       <PlayerArea data={right} pos="right-8 top-1/2 -translate-y-1/2" />
       
       {/* Chat Box */}
-      <div className="absolute top-4 right-4 w-64 h-48 bg-[#252526] border border-[#333333] rounded flex flex-col pointer-events-auto z-10 shadow-lg">
+      <div className="absolute top-4 right-4 w-72 h-56 bg-[#252526] border border-[#333333] rounded flex flex-col pointer-events-auto z-10 shadow-lg">
           <div className="flex-1 overflow-y-auto p-2 text-sm text-[#d4d4d4] scrollbar-thin">
               {chatMessages.map((msg, i) => (
                   <div key={i} className="mb-1">
                       <span className="text-[#858585] text-xs">[{msg.time}] </span>
                       <span className="font-bold text-[#569cd6]">{msg.sender}: </span>
-                      <span>{msg.text}</span>
+                      <span className="break-words">{msg.text}</span>
                   </div>
               ))}
               <div ref={chatEndRef} />
           </div>
-          <form onSubmit={handleChatSubmit} className="p-2 border-t border-[#333333] flex">
+          
+          {/* Emoji Picker */}
+          {showEmojiPicker && (
+              <div className="p-2 border-t border-[#333333] bg-[#1e1e1e] grid grid-cols-10 gap-1">
+                  {quickEmojis.map((emoji, i) => (
+                      <button 
+                          key={i} 
+                          type="button"
+                          onClick={() => {
+                              setChatInput(prev => prev + emoji);
+                              setShowEmojiPicker(false);
+                          }}
+                          className="text-lg hover:bg-[#3c3c3c] rounded p-1 transition-colors"
+                      >
+                          {emoji}
+                      </button>
+                  ))}
+              </div>
+          )}
+          
+          <form onSubmit={handleChatSubmit} className="p-2 border-t border-[#333333] flex items-center gap-1">
+              <button 
+                  type="button" 
+                  onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                  className="text-lg hover:bg-[#3c3c3c] rounded p-1"
+                  title="表情"
+              >
+                  😊
+              </button>
               <input 
-                  className="flex-1 bg-[#3c3c3c] border-none text-white text-sm focus:outline-none rounded px-2" 
-                  placeholder="Type..." 
+                  className="flex-1 bg-[#3c3c3c] border-none text-white text-sm focus:outline-none rounded px-2 py-1" 
+                  placeholder="输入消息..." 
                   value={chatInput}
                   onChange={e => setChatInput(e.target.value)}
               />
-              <button type="submit" className="text-[#0e639c] font-bold text-sm ml-2 hover:text-[#1177bb]">Send</button>
+              <button type="submit" className="text-[#0e639c] font-bold text-sm hover:text-[#1177bb]">发送</button>
           </form>
       </div>
 
@@ -559,7 +631,18 @@ export const GameTable: React.FC<Props> = ({
               ))
           )}
         </div>
-        <div className="text-white font-bold mt-2">{me.player?.name} (Me)</div>
+        <div className="relative">
+          {/* My Chat Bubble */}
+          {chatBubbles[mySeat] && (
+            <div className="absolute -top-12 left-1/2 -translate-x-1/2 z-50 animate-bounce-in">
+              <div className="relative bg-white text-gray-800 px-4 py-2 rounded-xl shadow-lg max-w-48 text-sm font-medium whitespace-pre-wrap">
+                {chatBubbles[mySeat]}
+                <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white"></div>
+              </div>
+            </div>
+          )}
+          <div className="text-white font-bold mt-2">{me.player?.name} (Me)</div>
+        </div>
       </div>
       
       {gameState && gameState.phase === 'Score' && (

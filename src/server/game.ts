@@ -823,6 +823,31 @@ export class Game {
     }
   }
   
+  // Bot emoji/chat messages
+  botEmojis = {
+      play: ['😎', '✨', '💪', '🔥', '👍', '😏', '🎯', '⚡'],
+      bomb: ['💣', '🔥🔥🔥', '💥', '😈', '🚀', '☄️', '🤯'],
+      win: ['🎉', '🥳', '😎👍', '✌️', '💯', '🏆'],
+      pass: ['😅', '🤔', '😢', '💭', '🙈', '😬'],
+      taunt: ['😂', '🤣', '😜', '👀', '🤭', '😁'],
+  };
+  
+  botSendChat(seatIndex: number, category: 'play' | 'bomb' | 'win' | 'pass' | 'taunt') {
+      // 30% chance to send emoji
+      if (Math.random() > 0.3) return;
+      
+      const emojis = this.botEmojis[category];
+      const emoji = emojis[Math.floor(Math.random() * emojis.length)];
+      const botName = this.players[seatIndex].name;
+      
+      this.io.to(this.roomId).emit('chatMessage', {
+          sender: botName,
+          text: emoji,
+          time: new Date().toLocaleTimeString(),
+          seatIndex: seatIndex
+      });
+  }
+
   handleBotTurn(seatIndex: number) {
       console.log(`[Bot] handleBotTurn called for seat ${seatIndex}. currentTurn=${this.currentTurn}, phase=${this.currentPhase}`);
       
@@ -861,9 +886,24 @@ export class Game {
       console.log(`[Bot] Seat ${seatIndex} decides: ${move ? `Play ${move.length} cards` : 'Pass'}`);
       
       if (move) {
+          // Check if it's a bomb (4+ same cards or straight flush)
+          const handType = getHandType(move, this.level);
+          const isBomb = handType && (handType.type === HandType.Bomb || handType.type === HandType.StraightFlush || handType.type === HandType.FourKings);
+          
           this.handlePlayHand(seatIndex, move);
+          
+          // Bot sends emoji based on action
+          if (isBomb) {
+              this.botSendChat(seatIndex, 'bomb');
+          } else if (this.hands[seatIndex].length === 0) {
+              // Bot just finished all cards
+              this.botSendChat(seatIndex, 'win');
+          } else {
+              this.botSendChat(seatIndex, 'play');
+          }
       } else {
           this.handlePass(seatIndex);
+          this.botSendChat(seatIndex, 'pass');
       }
   }
   

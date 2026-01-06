@@ -36,7 +36,7 @@ export function useGame() {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [mySeat, setMySeat] = useState<number>(-1);
   const [error, setError] = useState<string | null>(null);
-  const [chatMessages, setChatMessages] = useState<{sender: string, text: string, time: string}[]>([]);
+  const [chatMessages, setChatMessages] = useState<{sender: string, text: string, time: string, seatIndex: number}[]>([]);
 
   useEffect(() => {
     socket.on('roomState', (state: any) => {

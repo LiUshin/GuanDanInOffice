@@ -153,7 +153,12 @@ class Room {
   handleChat(socket: Socket, msg: string) {
       const p = this.players.find(p => p && p.id === socket.id);
       if (p) {
-          this.io.to(this.id).emit('chatMessage', { sender: p.name, text: msg, time: new Date().toLocaleTimeString() });
+          this.io.to(this.id).emit('chatMessage', { 
+              sender: p.name, 
+              text: msg, 
+              time: new Date().toLocaleTimeString(),
+              seatIndex: p.seatIndex  // Include seat for bubble display
+          });
       }
   }
 
