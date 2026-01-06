@@ -12,6 +12,7 @@ function App() {
     mySeat, 
     error,
     chatMessages,
+    roomList,
     actions 
   } = useGame();
   
@@ -42,7 +43,7 @@ function App() {
       )}
 
       {!inRoom ? (
-        <Lobby onJoin={actions.joinRoom} />
+        <Lobby onJoin={actions.joinRoom} roomList={roomList} onFetchRoomList={actions.fetchRoomList} />
       ) : (
           roomState && (
             <GameTable 
@@ -60,6 +61,7 @@ function App() {
               onSwitchSeat={actions.switchSeat}
               onSetGameMode={actions.setGameMode}
               onUseSkill={actions.useSkill}
+              onForceEndGame={actions.forceEndGame}
             />
         )
       )}

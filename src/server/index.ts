@@ -33,6 +33,10 @@ io.on('connection', (socket) => {
     roomManager.joinRoom(socket, playerName, roomId || 'default');
   });
 
+  socket.on('getRoomList', () => {
+    roomManager.handleGetRoomList(socket);
+  });
+
   socket.on('disconnect', () => {
     roomManager.handleDisconnect(socket);
   });

@@ -34,6 +34,23 @@ export class RoomManager {
       room.handleDisconnect(socket);
     }
   }
+
+  getRoomList() {
+    const roomList = Array.from(this.rooms.values()).map(room => ({
+      id: room.id,
+      playerCount: room.players.filter(p => p !== null && !p.isDisconnected).length,
+      maxPlayers: 4,
+      inGame: room.game !== null,
+      gameMode: room.gameMode,
+      hostName: room.players[0]?.name || 'Unknown'
+    }));
+    return roomList;
+  }
+
+  handleGetRoomList(socket: Socket) {
+    const roomList = this.getRoomList();
+    socket.emit('roomList', roomList);
+  }
 }
 
 class Room {
