@@ -1,8 +1,101 @@
-# EC2 部署指南 (Deployment Guide)
+# 部署指南 (Deployment Guide)
 
-本指南将帮助您将掼蛋游戏部署到 AWS EC2 实例上。
+本指南提供多种部署方式，包括 Docker 和传统 EC2 部署。
 
-## 📋 前置要求
+## 🐳 Docker 部署（推荐）
+
+### 优势
+- ✅ **环境隔离**：无需在主机安装 Node.js 和 npm
+- ✅ **多阶段构建**：构建过程完全在容器内完成
+- ✅ **一键部署**：简单快速，适合任何平台
+- ✅ **易于维护**：统一的运行环境，减少"在我机器上能跑"的问题
+
+### 前置要求
+- 安装 Docker 和 Docker Compose
+  - **Windows/Mac**: [Docker Desktop](https://www.docker.com/products/docker-desktop)
+  - **Linux**: 
+    ```bash
+    # Ubuntu/Debian
+    sudo apt update
+    sudo apt install docker.io docker-compose -y
+    sudo systemctl start docker
+    sudo systemctl enable docker
+    sudo usermod -aG docker $USER  # 添加当前用户到 docker 组
+    ```
+
+### 快速开始
+
+```bash
+# 1. 克隆或上传项目到服务器
+git clone https://github.com/your-username/guandan.git
+cd guandan
+
+# 2. 直接启动（Docker 会自动构建）
+docker-compose up -d
+
+# 3. 查看日志
+docker-compose logs -f
+
+# 4. 访问游戏
+# 打开浏览器访问 http://your-server-ip:3000
+```
+
+### 常用命令
+
+```bash
+# 停止服务
+docker-compose down
+
+# 重启服务
+docker-compose restart
+
+# 查看运行状态
+docker-compose ps
+
+# 查看实时日志
+docker-compose logs -f
+
+# 更新代码后重新部署
+git pull
+docker-compose down
+docker-compose up -d --build
+
+# 清理旧镜像（释放空间）
+docker system prune -a
+```
+
+### Dockerfile 说明
+
+我们使用**多阶段构建**来优化镜像大小和安全性：
+
+```dockerfile
+# 阶段 1: 构建阶段（包含所有开发依赖）
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm install  # 安装所有依赖（包括 devDependencies）
+COPY . .
+RUN npm run build  # 在容器内构建
+
+# 阶段 2: 生产阶段（只包含运行时依赖）
+FROM node:18-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production  # 只安装生产依赖
+COPY --from=builder /app/dist ./dist  # 从构建阶段复制产物
+CMD ["node", "dist/server/index.js"]
+```
+
+**优势**：
+- 最终镜像只包含生产依赖和构建产物
+- 镜像体积更小（~150MB vs ~500MB）
+- 更安全（不包含构建工具）
+
+---
+
+## 🖥️ EC2 传统部署
+
+### 📋 前置要求
 
 - 一个 AWS 账户
 - 一个 EC2 实例（推荐 t2.micro 或更高配置）
@@ -292,12 +385,29 @@ chmod +x deploy.sh
 ./deploy.sh
 ```
 
+## 🆚 部署方式对比
+
+| 特性 | Docker 部署 | PM2 部署 |
+|------|------------|----------|
+| **环境隔离** | ✅ 完全隔离 | ❌ 依赖主机环境 |
+| **部署难度** | ⭐ 简单 | ⭐⭐ 中等 |
+| **主机依赖** | 只需 Docker | 需要 Node.js + npm |
+| **资源占用** | 稍高（~200MB） | 较低（~100MB） |
+| **更新方式** | `docker-compose up -d --build` | `git pull && npm run build && pm2 restart` |
+| **日志管理** | Docker logs | PM2 logs |
+| **推荐场景** | 生产环境、多服务器 | 开发环境、单服务器 |
+
 ## 🔗 相关链接
 
+- [Docker 文档](https://docs.docker.com/)
+- [Docker Compose 文档](https://docs.docker.com/compose/)
 - [AWS EC2 文档](https://docs.aws.amazon.com/ec2/)
 - [PM2 文档](https://pm2.keymetrics.io/docs/usage/quick-start/)
 - [Nginx 文档](https://nginx.org/en/docs/)
 
 ---
 
-**提示**: 如果您的团队分布在不同地区，建议选择离大多数玩家较近的 AWS 区域（如 `ap-southeast-1` 新加坡 或 `ap-northeast-1` 东京）以降低延迟。
+**提示**: 
+- **Docker 部署**：推荐用于生产环境，环境一致性好，易于扩展。
+- **PM2 部署**：适合轻量级部署，资源占用更少。
+- 如果您的团队分布在不同地区，建议选择离大多数玩家较近的 AWS 区域（如 `ap-southeast-1` 新加坡 或 `ap-northeast-1` 东京）以降低延迟。

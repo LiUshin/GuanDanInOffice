@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { socket } from './socket';
-import { Card, GameMode, SkillCard, Hand } from '../shared/types';
+import { Card, GameMode, SkillCard, Hand, HistoryEntry } from '../shared/types';
 
 export interface GameState {
   phase: string;
@@ -22,6 +22,9 @@ export interface GameState {
   skipNextTurn?: boolean[];
   // New cards to highlight
   newCardIds?: string[];
+  // Game history
+  history?: HistoryEntry[];
+  currentRound?: number;
 }
 
 export interface RoomState {

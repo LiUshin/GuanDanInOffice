@@ -1,7 +1,7 @@
 import { Server, Socket } from 'socket.io';
 import { createDeck, shuffleDeck, updateCardProperties } from '../shared/deck';
 import { getHandType, compareHands, sortCards, getLargestCard, getLogicValue } from '../shared/rules';
-import { Card, Hand, HandType, GameMode, SkillCard, SkillCardType, Suit, Rank } from '../shared/types';
+import { Card, Hand, HandType, GameMode, SkillCard, SkillCardType, Suit, Rank, HistoryEntry, HistoryEventType } from '../shared/types';
 import { Bot } from '../shared/bot';
 
 interface Player {
@@ -64,6 +64,11 @@ export class Game {
   skillCards: SkillCard[][] = [[], [], [], []];  // Each player's skill cards
   skipNextTurn: boolean[] = [false, false, false, false];  // 乐不思蜀 effect
   newCardIds: { [seat: number]: string[] } = {};  // Track newly acquired cards for highlight
+  
+  // Game History
+  history: HistoryEntry[] = [];
+  private historyIdCounter: number = 0;
+  currentRound: number = 0;
 
   constructor(io: Server, roomId: string, players: Player[], gameMode: GameMode = GameMode.Normal) {
     this.io = io;
@@ -131,6 +136,36 @@ export class Game {
           }
       });
   }
+  
+  // History logging methods
+  private addHistoryEntry(type: HistoryEventType, message: string, playerIndex?: number, details?: any) {
+      const entry: HistoryEntry = {
+          id: `history-${this.historyIdCounter++}`,
+          timestamp: Date.now(),
+          type,
+          playerIndex,
+          playerName: playerIndex !== undefined ? this.players[playerIndex]?.name : undefined,
+          message,
+          details
+      };
+      this.history.push(entry);
+      
+      // Broadcast to all players
+      this.io.to(this.roomId).emit('historyUpdate', entry);
+  }
+  
+  private getCardDescription(cards: Card[]): string {
+      if (cards.length === 0) return '';
+      if (cards.length === 1) {
+          const c = cards[0];
+          const suitName = ['♠', '♥', '♣', '♦', 'Joker'][c.suit];
+          const rankName = c.rank === 15 ? '小王' : c.rank === 16 ? '大王' : 
+                          c.rank === 11 ? 'J' : c.rank === 12 ? 'Q' : 
+                          c.rank === 13 ? 'K' : c.rank === 14 ? 'A' : c.rank.toString();
+          return c.rank >= 15 ? rankName : `${suitName}${rankName}`;
+      }
+      return `${cards.length}张牌`;
+  }
 
   // Called by Room when restarting
   resetAndStart() {
@@ -153,10 +188,24 @@ export class Game {
         // Fresh game
         this.activeTeam = 0;
         this.teamLevels = { 0: 2, 1: 2 };
+        this.currentRound = 1;
+        this.history = []; // Clear history for new match
+        this.historyIdCounter = 0;
+    } else {
+        this.currentRound++;
     }
 
     // Use Active Team Level
     this.level = this.teamLevels[this.activeTeam];
+    
+    // Add history entry for game start
+    const teamName = this.activeTeam === 0 ? 'Team 0 (Seat 0, 2)' : 'Team 1 (Seat 1, 3)';
+    this.addHistoryEntry(
+        HistoryEventType.GameStart,
+        `第${this.currentRound}局开始 - 当前等级: ${this.level} - 庄家: ${teamName}`,
+        undefined,
+        { level: this.level, activeTeam: this.activeTeam, round: this.currentRound }
+    );
 
     let deck = createDeck();
     deck = shuffleDeck(deck);
@@ -363,6 +412,14 @@ export class Game {
       this.hands[tribute.to].push(cards[0]);
       this.hands[tribute.to] = sortCards(this.hands[tribute.to], this.level);
       
+      // Add history entry for tribute
+      this.addHistoryEntry(
+          HistoryEventType.Tribute,
+          `${this.players[seatIndex].name} 向 ${this.players[tribute.to].name} 进贡: ${this.getCardDescription([cards[0]])}`,
+          seatIndex,
+          { card: cards[0], to: tribute.to }
+      );
+      
       const allDone = this.tributeState.pendingTributes.every(t => t.card);
       if (allDone) {
           // Determine who goes first in next round (Playing Phase)
@@ -431,6 +488,14 @@ export class Game {
       this.hands[seatIndex] = this.hands[seatIndex].filter(c => c.id !== cards[0].id);
       this.hands[ret.to].push(cards[0]);
       this.hands[ret.to] = sortCards(this.hands[ret.to], this.level);
+      
+      // Add history entry for return tribute
+      this.addHistoryEntry(
+          HistoryEventType.ReturnTribute,
+          `${this.players[seatIndex].name} 向 ${this.players[ret.to].name} 还贡: ${this.getCardDescription([cards[0]])}`,
+          seatIndex,
+          { card: cards[0], to: ret.to }
+      );
       
       this.checkReturnDone();
       this.broadcastGameState();
@@ -507,8 +572,30 @@ export class Game {
       this.roundActions = {};
       this.roundActions[seatIndex] = { type: 'play', cards: cards, hand: hand };
       
+      // Add history entry
+      const handTypeName = {
+          'Single': '单牌', 'Pair': '对子', 'Trips': '三张', 'TripsWithPair': '三带二',
+          'Straight': '顺子', 'Tube': '钢板', 'Plate': '连对', 
+          'Bomb': '炸弹', 'StraightFlush': '同花顺', 'FourKings': '四大天王'
+      }[hand.type] || hand.type;
+      this.addHistoryEntry(
+          HistoryEventType.Play,
+          `${this.players[seatIndex].name} 出牌: ${handTypeName} (${this.getCardDescription(cards)})`,
+          seatIndex,
+          { cards, handType: hand.type, cardsCount: cards.length }
+      );
+      
       if (this.hands[seatIndex].length === 0) {
           this.winners.push(seatIndex);
+          
+          // Add history entry for player finish
+          const position = ['第一名', '第二名', '第三名', '第四名'][this.winners.length - 1];
+          this.addHistoryEntry(
+              HistoryEventType.PlayerFinish,
+              `${this.players[seatIndex].name} 出完所有牌，获得${position}！`,
+              seatIndex,
+              { position: this.winners.length }
+          );
           
           // Check Double Win (First two winners are same team)
           if (this.winners.length === 2) {
@@ -593,6 +680,13 @@ export class Game {
       
       this.roundActions[seatIndex] = { type: 'pass' };
       console.log(`[handlePass] Player ${seatIndex} passed.`);
+      
+      // Add history entry
+      this.addHistoryEntry(
+          HistoryEventType.Pass,
+          `${this.players[seatIndex].name} 选择过牌`,
+          seatIndex
+      );
       
       this.advanceTurn();
       this.broadcastGameState();
@@ -760,6 +854,27 @@ export class Game {
           // Only remove the skill card after successful application
           this.skillCards[seatIndex].splice(skillIndex, 1);
           console.log(`[Skill] Player ${seatIndex} used ${skill.type}${targetSeat !== undefined ? ` on Player ${targetSeat}` : ''}`);
+          
+          // Add history entry for skill use
+          const skillNames = {
+              [SkillCardType.DrawTwo]: '无中生有',
+              [SkillCardType.Steal]: '顺手牵羊',
+              [SkillCardType.Discard]: '过河拆桥',
+              [SkillCardType.Skip]: '乐不思蜀',
+              [SkillCardType.Harvest]: '五谷丰登'
+          };
+          const skillName = skillNames[skill.type];
+          const targetName = targetSeat !== undefined ? this.players[targetSeat].name : '';
+          const message = targetSeat !== undefined 
+              ? `${this.players[seatIndex].name} 对 ${targetName} 使用了 ${skillName}`
+              : `${this.players[seatIndex].name} 使用了 ${skillName}`;
+          this.addHistoryEntry(
+              HistoryEventType.SkillUse,
+              message,
+              seatIndex,
+              { skillType: skill.type, targetSeat }
+          );
+          
           this.broadcastGameState();
       }
   }
@@ -853,6 +968,29 @@ export class Game {
       console.log(`[endGame] Game ended. Winners: ${this.winners.join(', ')}`);
       this.currentPhase = GamePhase.Score;
       
+      // Add history entry for game end
+      const winnerNames = this.winners.map(w => this.players[w].name).join(', ');
+      const team0 = this.winners.filter(w => w % 2 === 0);
+      const team1 = this.winners.filter(w => w % 2 === 1);
+      
+      let resultType = '';
+      if (team0.length === 2 && this.winners[0] % 2 === 0 && this.winners[1] % 2 === 0) {
+          resultType = 'Team 0 双扣！';
+      } else if (team1.length === 2 && this.winners[0] % 2 === 1 && this.winners[1] % 2 === 1) {
+          resultType = 'Team 1 双扣！';
+      } else if (this.winners[0] % 2 === this.winners[2] % 2) {
+          resultType = `Team ${this.winners[0] % 2} 单扣`;
+      } else {
+          resultType = `Team ${this.winners[0] % 2} 保级`;
+      }
+      
+      this.addHistoryEntry(
+          HistoryEventType.GameEnd,
+          `游戏结束！${resultType} - 排名: ${winnerNames}`,
+          undefined,
+          { winners: this.winners, resultType }
+      );
+      
       // Broadcast final game state FIRST so clients see the last hand
       this.broadcastGameState();
       
@@ -892,7 +1030,10 @@ export class Game {
                 mySkillCards: this.skillCards[idx],  // Only send player's own skill cards
                 skipNextTurn: this.skipNextTurn,
                 // New cards highlight
-                newCardIds: myNewCardIds
+                newCardIds: myNewCardIds,
+                // Game history
+                history: this.history,
+                currentRound: this.currentRound
             });
             
             // Delay clearing newCardIds to give client time to display highlight

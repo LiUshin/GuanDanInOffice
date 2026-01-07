@@ -87,3 +87,35 @@ export const SkillCardNames: { [key in SkillCardType]: string } = {
   [SkillCardType.Skip]: '乐不思蜀',
   [SkillCardType.Harvest]: '五谷丰登'
 };
+
+// Game History Log Entry Types
+export enum HistoryEventType {
+  GameStart = 'GameStart',
+  PhaseChange = 'PhaseChange',
+  Play = 'Play',
+  Pass = 'Pass',
+  Tribute = 'Tribute',
+  ReturnTribute = 'ReturnTribute',
+  SkillUse = 'SkillUse',
+  RoundEnd = 'RoundEnd',
+  PlayerFinish = 'PlayerFinish',
+  GameEnd = 'GameEnd',
+  LevelUp = 'LevelUp'
+}
+
+export interface HistoryEntry {
+  id: string;
+  timestamp: number;
+  type: HistoryEventType;
+  playerIndex?: number;
+  playerName?: string;
+  message: string; // Human-readable message
+  details?: any; // Additional data (cards, skill type, etc.)
+}
+
+// Client-side game history state
+export interface GameHistory {
+  entries: HistoryEntry[];
+  currentRound: number;
+  currentLevel: number;
+}

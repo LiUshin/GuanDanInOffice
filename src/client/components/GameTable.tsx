@@ -6,6 +6,7 @@ import { GameState, RoomState } from '../useGame';
 import { getLogicValue, isConsecutive, getAllPossibleHandTypes, getHandDescription } from '../../shared/rules';
 import { SkillCardButton } from './SkillCardButton';
 import { TargetSelectModal } from './TargetSelectModal';
+import { GameHistory } from './GameHistory';
 
 interface Props {
   gameState: GameState | null;
@@ -48,6 +49,9 @@ export const GameTable: React.FC<Props> = ({
   
   // Chat bubble state for each seat (seat -> message)
   const [chatBubbles, setChatBubbles] = useState<{ [seat: number]: string }>({});
+  
+  // History window state
+  const [showHistory, setShowHistory] = useState(false);
   
   // Hand type selection state (for wild cards with multiple interpretations)
   const [possibleHands, setPossibleHands] = useState<Hand[]>([]);
@@ -342,6 +346,18 @@ export const GameTable: React.FC<Props> = ({
     const action = gameState?.roundActions?.[data.seat];
     const bubble = chatBubbles[data.seat];
     
+    // Get winner position (头游、二游、三游、末游)
+    const getWinnerPosition = () => {
+      if (!gameState || !gameState.winners) return null;
+      const position = gameState.winners.indexOf(data.seat);
+      if (position === -1) return null;
+      const labels = ['头游', '二游', '三游', '末游'];
+      const colors = ['bg-yellow-500', 'bg-orange-500', 'bg-purple-500', 'bg-gray-500'];
+      return { label: labels[position], color: colors[position] };
+    };
+    
+    const winnerPos = getWinnerPosition();
+    
     return (
       <div 
           className={`absolute ${pos} flex flex-col items-center p-4 rounded-lg transition-colors ${data.isTeammate ? 'bg-blue-900/40 border-2 border-blue-400' : 'bg-black/20'} ${!gameState && !data.player ? 'cursor-pointer hover:bg-white/10' : ''}`}
@@ -365,6 +381,12 @@ export const GameTable: React.FC<Props> = ({
            {data.player && data.player.seatIndex === 0 && (
                <div className="absolute -bottom-1 -right-1 text-xs bg-yellow-500 text-black px-1 rounded font-bold border border-white">
                    Host
+               </div>
+           )}
+           {/* Winner Position Badge */}
+           {winnerPos && (
+               <div className={`absolute -top-2 left-1/2 -translate-x-1/2 ${winnerPos.color} text-white text-xs px-2 py-0.5 rounded-full font-bold shadow-lg border-2 border-white animate-pulse`}>
+                   {winnerPos.label}
                </div>
            )}
          </div>
@@ -762,6 +784,35 @@ export const GameTable: React.FC<Props> = ({
               onSelect={handleTargetSelect}
               onCancel={handleTargetCancel}
           />
+      )}
+      
+      {/* Game History Window */}
+      {gameState && gameState.history && (
+          <GameHistory
+              history={gameState.history}
+              currentRound={gameState.currentRound || 1}
+              isOpen={showHistory}
+              onClose={() => setShowHistory(false)}
+          />
+      )}
+      
+      {/* History Button (floating) */}
+      {gameState && (
+          <button
+              onClick={() => setShowHistory(true)}
+              className="fixed top-4 right-4 z-40 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg shadow-lg font-medium transition flex items-center gap-2"
+              title="查看游戏历史记录"
+          >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              历史记录
+              {gameState.history && gameState.history.length > 0 && (
+                  <span className="bg-red-500 text-xs px-2 py-0.5 rounded-full">
+                      {gameState.history.length}
+                  </span>
+              )}
+          </button>
       )}
     </div>
   );
