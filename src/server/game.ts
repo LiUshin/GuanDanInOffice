@@ -38,6 +38,10 @@ export class Game {
   // Callback for when game ends (used by Match)
   onGameEnd?: (winners: number[]) => void;
   
+  // Lifecycle management
+  private isActive: boolean = true;
+  private pendingTimeouts: NodeJS.Timeout[] = [];
+  
   hands: Card[][] = [[], [], [], []];
   currentTurn: number = 0;
   
@@ -99,6 +103,33 @@ export class Game {
       s.on('returnTribute', (cards: Card[]) => this.handleReturnTribute(p.seatIndex, cards));
       s.on('useSkill', (data: { skillId: string, targetSeat?: number }) => 
           this.handleUseSkill(p.seatIndex, data.skillId, data.targetSeat));
+  }
+  
+  // Lifecycle management methods
+  private registerTimeout(timeout: NodeJS.Timeout) {
+      this.pendingTimeouts.push(timeout);
+  }
+  
+  private clearAllTimeouts() {
+      this.pendingTimeouts.forEach(t => clearTimeout(t));
+      this.pendingTimeouts = [];
+  }
+  
+  destroy() {
+      console.log(`[Game] Destroying game instance for room ${this.roomId}`);
+      this.isActive = false;
+      this.clearAllTimeouts();
+      
+      // Unbind all socket listeners
+      this.players.forEach(p => {
+          if (p.socket) {
+              p.socket.removeAllListeners('playHand');
+              p.socket.removeAllListeners('pass');
+              p.socket.removeAllListeners('tribute');
+              p.socket.removeAllListeners('returnTribute');
+              p.socket.removeAllListeners('useSkill');
+          }
+      });
   }
 
   // Called by Room when restarting
@@ -675,6 +706,18 @@ export class Game {
   }
   
   handleUseSkill(seatIndex: number, skillId: string, targetSeat?: number) {
+      // Check if game is still active
+      if (!this.isActive) {
+          console.log(`[Skill] Game is no longer active, ignoring skill use`);
+          return;
+      }
+      
+      // Check if game has ended
+      if (this.winners.length >= 3) {
+          this.emitError(seatIndex, '游戏已结束，无法使用技能');
+          return;
+      }
+      
       if (this.gameMode !== GameMode.Skill) {
           this.emitError(seatIndex, '当前不是技能模式');
           return;
@@ -710,11 +753,11 @@ export class Game {
           }
       }
       
-      // Apply the skill effect
+      // Apply the skill effect first
       const success = this.applySkillEffect(skill.type, seatIndex, targetSeat);
       
       if (success) {
-          // Remove the used skill card
+          // Only remove the skill card after successful application
           this.skillCards[seatIndex].splice(skillIndex, 1);
           console.log(`[Skill] Player ${seatIndex} used ${skill.type}${targetSeat !== undefined ? ` on Player ${targetSeat}` : ''}`);
           this.broadcastGameState();
@@ -722,6 +765,12 @@ export class Game {
   }
   
   applySkillEffect(type: SkillCardType, user: number, target?: number): boolean {
+      // Check if game is still active
+      if (!this.isActive || this.winners.length >= 3) {
+          console.log(`[Skill] Cannot apply skill effect, game is ending/ended`);
+          return false;
+      }
+      
       const playerName = this.players[user].name;
       const targetName = target !== undefined ? this.players[target].name : '';
       
@@ -779,7 +828,10 @@ export class Game {
           
           case SkillCardType.Harvest: {
               // 五谷丰登: All active players get 1 random card
-              const activePlayers = [0, 1, 2, 3].filter(i => this.hands[i].length > 0);
+              // Explicitly filter out players who have finished
+              const activePlayers = [0, 1, 2, 3].filter(i => 
+                  this.hands[i].length > 0 && !this.winners.includes(i)
+              );
               activePlayers.forEach(seat => {
                   const card = this.generateRandomCard();
                   this.hands[seat].push(card);
@@ -823,6 +875,7 @@ export class Game {
   broadcastGameState() {
     this.players.forEach((p, idx) => {
         if (!p.isBot && p.socket) {
+            const myNewCardIds = this.newCardIds[idx] || [];
             p.socket.emit('gameState', {
                 phase: this.currentPhase,
                 level: this.level,
@@ -839,13 +892,23 @@ export class Game {
                 mySkillCards: this.skillCards[idx],  // Only send player's own skill cards
                 skipNextTurn: this.skipNextTurn,
                 // New cards highlight
-                newCardIds: this.newCardIds[idx] || []
+                newCardIds: myNewCardIds
             });
+            
+            // Delay clearing newCardIds to give client time to display highlight
+            if (myNewCardIds.length > 0) {
+                const timeout = setTimeout(() => {
+                    if (this.isActive) {
+                        this.newCardIds[idx] = [];
+                    }
+                }, 2000); // Clear after 2 seconds
+                this.registerTimeout(timeout);
+            }
         }
     });
     
-    // Clear new card IDs after broadcasting (they only need to be shown once)
-    this.newCardIds = {};
+    // Don't globally clear newCardIds anymore
+    // this.newCardIds = {};
     
     // Bot Turn Logic
     const currentPlayer = this.players[this.currentTurn];
@@ -853,7 +916,14 @@ export class Game {
         // Capture the current seat to avoid race conditions
         const botSeat = this.currentTurn;
         console.log(`[Bot] Scheduling Bot ${botSeat} to play in 1.5s...`);
-        setTimeout(() => this.handleBotTurn(botSeat), 1500);
+        const timeout = setTimeout(() => {
+            if (!this.isActive) {
+                console.log(`[Bot] Game no longer active, aborting bot turn for seat ${botSeat}`);
+                return;
+            }
+            this.handleBotTurn(botSeat);
+        }, 1500);
+        this.registerTimeout(timeout);
     } else {
         // Human's turn or game over
         console.log(`[Turn] Now waiting for Player ${this.currentTurn} (Human) to play. Phase: ${this.currentPhase}`);
@@ -886,6 +956,12 @@ export class Game {
   }
 
   handleBotTurn(seatIndex: number) {
+      // Check if game is still active
+      if (!this.isActive) {
+          console.log(`[Bot] Game is no longer active, aborting bot turn`);
+          return;
+      }
+      
       console.log(`[Bot] handleBotTurn called for seat ${seatIndex}. currentTurn=${this.currentTurn}, phase=${this.currentPhase}`);
       
       if (this.currentPhase !== GamePhase.Playing) {
@@ -912,7 +988,14 @@ export class Game {
               console.log(`[Bot] Seat ${seatIndex} decides to use skill: ${skillDecision.skill.type}`);
               this.handleUseSkill(seatIndex, skillDecision.skill.id, skillDecision.target);
               // After using skill, schedule another bot turn for playing cards
-              setTimeout(() => this.handleBotTurn(seatIndex), 1000);
+              const timeout = setTimeout(() => {
+                  if (!this.isActive) {
+                      console.log(`[Bot] Game no longer active, aborting bot turn for seat ${seatIndex}`);
+                      return;
+                  }
+                  this.handleBotTurn(seatIndex);
+              }, 1000);
+              this.registerTimeout(timeout);
               return;
           }
       }

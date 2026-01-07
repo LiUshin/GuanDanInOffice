@@ -21,6 +21,9 @@ export class Match {
     consecutiveWins: { [key: number]: number } = { 0: 0, 1: 0 }; // Track consecutive wins at level A
     matchWinner: number | null = null; // Team that won the match
     
+    // Store last game's winners for tribute phase
+    private lastWinners: number[] = [];
+    
     constructor(io: Server, roomId: string, players: Player[], gameMode: GameMode) {
         this.io = io;
         this.roomId = roomId;
@@ -51,11 +54,19 @@ export class Match {
         
         console.log(`[Match ${this.roomId}] Starting new game. Team levels: ${JSON.stringify(this.teamLevels)}, Active team: ${this.activeTeam}`);
         
-        // Store previous winners before creating new game
-        const prevWinners = this.currentGame ? this.currentGame.prevWinners : [];
+        // Destroy old game instance to clean up timeouts and listeners
+        if (this.currentGame) {
+            this.currentGame.destroy();
+        }
+        
+        // Get previous winners from Match storage
+        const prevWinners = this.lastWinners || [];
+        
+        // Deep copy players array to avoid reference conflicts
+        const gamePlayers = this.players.map(p => ({ ...p }));
         
         // Create new game
-        this.currentGame = new Game(this.io, this.roomId, this.players, this.gameMode);
+        this.currentGame = new Game(this.io, this.roomId, gamePlayers, this.gameMode);
         this.currentGame.teamLevels = { ...this.teamLevels };
         this.currentGame.activeTeam = this.activeTeam;
         this.currentGame.prevWinners = prevWinners;
@@ -121,10 +132,8 @@ export class Match {
             this.consecutiveWins[1] = 0;
         }
         
-        // Store winners for next game's tribute phase
-        if (this.currentGame) {
-            this.currentGame.prevWinners = winners;
-        }
+        // Store winners in Match for next game's tribute phase
+        this.lastWinners = winners;
         
         // Auto-start next game after a short delay
         setTimeout(() => {
