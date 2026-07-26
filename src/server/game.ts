@@ -521,23 +521,15 @@ export class Game {
       if (this.currentPhase !== GamePhase.Playing) return;
       if (this.currentTurn !== seatIndex) return;
       
-      // Use provided hand type if available, otherwise infer it
-      let hand: Hand | null;
-      if (providedHandType) {
-          // Validate that the provided hand type is actually valid for these cards
-          const inferredHand = getHandType(cards, this.level);
-          if (!inferredHand) {
-              this.emitError(seatIndex, 'Invalid hand');
-              return;
-          }
-          // Use the provided interpretation
-          hand = providedHandType;
-      } else {
-          hand = getHandType(cards, this.level);
-          if (!hand) {
-              this.emitError(seatIndex, 'Invalid hand');
-              return;
-          }
+      // Always infer the hand type on the server using the authoritative level.
+      // The client may send a providedHandType (e.g. for wild-card interpretations),
+      // but its value can be stale/wrong if the client's gameState.level is out of
+      // sync with the server's level. Re-derive everything from the server side so
+      // level cards always compare correctly.
+      let hand: Hand | null = getHandType(cards, this.level);
+      if (!hand) {
+          this.emitError(seatIndex, 'Invalid hand');
+          return;
       }
       
       // Debug Log
