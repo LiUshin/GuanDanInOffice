@@ -6,7 +6,8 @@ interface Props {
   selected?: boolean;
   onClick?: () => void;
   small?: boolean;
-  isHighlighted?: boolean;  // For new card highlight animation
+  isHighlighted?: boolean;
+  hint?: boolean;
 }
 
 const getSuitSymbol = (suit: Suit) => {
@@ -39,7 +40,7 @@ const getRankLabel = (rank: Rank) => {
   }
 };
 
-export const Card: React.FC<Props> = ({ card, selected, onClick, small, isHighlighted }) => {
+export const Card: React.FC<Props> = ({ card, selected, onClick, small, isHighlighted, hint }) => {
   const isRed = card.suit === Suit.Hearts || card.suit === Suit.Diamonds || card.rank === Rank.BigJoker;
   const isJoker = card.suit === Suit.Joker;
   
@@ -52,7 +53,9 @@ export const Card: React.FC<Props> = ({ card, selected, onClick, small, isHighli
   // Highlight animation for new cards - glowing green border with pulse
   const highlightClasses = isHighlighted 
     ? "ring-4 ring-green-400 shadow-[0_0_15px_rgba(74,222,128,0.7)] animate-pulse" 
-    : "";
+    : hint
+      ? "ring-2 ring-amber-400"
+      : "";
 
   if (isJoker) {
      return (

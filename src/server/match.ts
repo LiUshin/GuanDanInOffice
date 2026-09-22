@@ -23,6 +23,7 @@ export class Match {
     
     // Store last game's winners for tribute phase
     private lastWinners: number[] = [];
+    private roundNumber = 0;
     onMatchEnd?: () => void;
     private nextGameTimer: NodeJS.Timeout | null = null;
     private aborted = false;
@@ -43,6 +44,7 @@ export class Match {
         this.activeTeam = 0;
         this.consecutiveWins = { 0: 0, 1: 0 };
         this.matchWinner = null;
+        this.roundNumber = 0;
         this.startNextGame();
     }
     
@@ -70,6 +72,8 @@ export class Match {
         
         // Create new game
         this.currentGame = new Game(this.io, this.roomId, gamePlayers, this.gameMode);
+        this.roundNumber += 1;
+        this.currentGame.currentRound = this.roundNumber;
         this.currentGame.teamLevels = { ...this.teamLevels };
         this.currentGame.activeTeam = this.activeTeam;
         this.currentGame.prevWinners = prevWinners;

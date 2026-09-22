@@ -30,7 +30,7 @@ export interface GameState {
 
 export interface RoomState {
   roomId: string;
-  players: ({ name: string, seatIndex: number, isReady: boolean } | null)[];
+  players: ({ name: string, seatIndex: number, isReady: boolean, isHost?: boolean, isBot?: boolean, isDisconnected?: boolean } | null)[];
   gameMode?: GameMode;
 }
 
@@ -100,7 +100,14 @@ export function useGame() {
 
     socket.on('gameTerminated', () => {
         console.log('[Client] Game Terminated by Host');
-        setGameState(null); // Clear game state to return to lobby
+        setGameState(null);
+    });
+
+    socket.on('leftRoom', () => {
+        setInRoom(false);
+        setRoomState(null);
+        setGameState(null);
+        setMySeat(-1);
     });
 
     socket.on('roomList', (list: any[]) => {
@@ -117,6 +124,7 @@ export function useGame() {
       socket.off('gameOver');
       socket.off('matchOver');
       socket.off('gameTerminated');
+      socket.off('leftRoom');
       socket.off('roomList');
     };
   }, []);
@@ -169,9 +177,13 @@ export function useGame() {
       socket.emit('forceEndGame');
   }
 
+  const leaveRoom = () => {
+      socket.emit('leaveRoom');
+  };
+
   const fetchRoomList = () => {
       socket.emit('getRoomList');
-  }
+  };
 
   return {
     inRoom,
@@ -184,6 +196,6 @@ export function useGame() {
     matchResult,
     chatMessages,
     roomList,
-    actions: { joinRoom, setReady, playHand, passTurn, startGame, payTribute, returnTribute, sendChat, switchSeat, setGameMode, useSkill, forceEndGame, fetchRoomList, dismissMatchResult: () => setMatchResult(null) }
+    actions: { joinRoom, setReady, playHand, passTurn, startGame, payTribute, returnTribute, sendChat, switchSeat, setGameMode, useSkill, forceEndGame, fetchRoomList, leaveRoom, dismissMatchResult: () => setMatchResult(null) }
   };
 }

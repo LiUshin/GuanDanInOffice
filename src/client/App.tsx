@@ -75,6 +75,7 @@ function App() {
               onSetGameMode={actions.setGameMode}
               onUseSkill={actions.useSkill}
               onForceEndGame={actions.forceEndGame}
+              onLeave={actions.leaveRoom}
             />
         )
       )}

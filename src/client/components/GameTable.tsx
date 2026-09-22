@@ -3,7 +3,7 @@ import { Card as CardType, Rank, Suit, GameMode, SkillCard, SkillCardType, Hand,
 import { Bot } from '../../shared/bot';
 import { Card } from './Card';
 import { GameState, RoomState } from '../useGame';
-import { getAllPossibleHandTypes, getHandDescription, sortCards, formatLevelRank } from '../../shared/rules';
+import { getAllPossibleHandTypes, getHandDescription, sortCards, formatLevelRank, getLogicValue } from '../../shared/rules';
 import { arrangeHand, CardGroup } from '../../shared/arrange';
 import { SkillCardButton } from './SkillCardButton';
 import { TargetSelectModal } from './TargetSelectModal';
@@ -27,12 +27,13 @@ interface Props {
   onSetGameMode?: (mode: GameMode) => void;
   onUseSkill?: (skillId: string, targetSeat?: number) => void;
   onForceEndGame?: () => void;
+  onLeave?: () => void;
 }
 
 export const GameTable: React.FC<Props> = ({ 
   gameState, roomState, mySeat, onPlay, onPass, onReady, onStart,
   onTribute, onReturnTribute, chatMessages, onSendChat, onSwitchSeat,
-  onSetGameMode, onUseSkill, onForceEndGame
+  onSetGameMode, onUseSkill, onForceEndGame, onLeave
 }) => {
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState('');
@@ -55,6 +56,8 @@ export const GameTable: React.FC<Props> = ({
   
   // History window state
   const [showHistory, setShowHistory] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const bubbleTimers = useRef<{ [seat: number]: number }>({});
   
   // Hand type selection state (for wild cards with multiple interpretations)
   const [possibleHands, setPossibleHands] = useState<Hand[]>([]);
@@ -81,27 +84,19 @@ export const GameTable: React.FC<Props> = ({
   
   // Track chat messages and show bubbles
   useEffect(() => {
-      if (chatMessages.length > 0) {
-          const lastMsg = chatMessages[chatMessages.length - 1];
-          if (lastMsg.seatIndex !== undefined) {
-              // Show bubble for this seat
-              setChatBubbles(prev => ({
-                  ...prev,
-                  [lastMsg.seatIndex]: lastMsg.text
-              }));
-              
-              // Clear bubble after 5 seconds
-              const timer = setTimeout(() => {
-                  setChatBubbles(prev => {
-                      const updated = { ...prev };
-                      delete updated[lastMsg.seatIndex];
-                      return updated;
-                  });
-              }, 5000);
-              
-              return () => clearTimeout(timer);
-          }
-      }
+      if (chatMessages.length === 0) return;
+      const lastMsg = chatMessages[chatMessages.length - 1];
+      if (lastMsg.seatIndex === undefined) return;
+      const seat = lastMsg.seatIndex;
+      setChatBubbles(prev => ({ ...prev, [seat]: lastMsg.text }));
+      window.clearTimeout(bubbleTimers.current[seat]);
+      bubbleTimers.current[seat] = window.setTimeout(() => {
+          setChatBubbles(prev => {
+              const updated = { ...prev };
+              delete updated[seat];
+              return updated;
+          });
+      }, 5000);
   }, [chatMessages.length]);
   
   // Auto-scroll chat
@@ -282,6 +277,18 @@ export const GameTable: React.FC<Props> = ({
       (gameState.phase === 'ReturnTribute' && gameState.tributeState.pendingReturns.some((t: any) => t.from === mySeat))
   );
 
+  const tributeHintIds = useMemo(() => {
+      if (!amIPaying || !gameState) return new Set<string>();
+      if (gameState.phase === 'Tribute') {
+          const max = Math.max(...handCards.map(card => getLogicValue(card.rank, level)));
+          return new Set(handCards.filter(card => getLogicValue(card.rank, level) === max).map(card => card.id));
+      }
+      const legal = handCards.filter(card => card.rank <= Rank.Ten && card.rank !== level);
+      if (legal.length > 0) return new Set(legal.map(card => card.id));
+      const min = Math.min(...handCards.map(card => getLogicValue(card.rank, level)));
+      return new Set(handCards.filter(card => getLogicValue(card.rank, level) === min).map(card => card.id));
+  }, [amIPaying, gameState, handCards, level]);
+
   const renderLastHand = () => {
     if (!gameState || !gameState.lastHand) return null;
     const { playerIndex, hand } = gameState.lastHand;
@@ -353,7 +360,7 @@ export const GameTable: React.FC<Props> = ({
            {data.player ? data.player.name[0].toUpperCase() : (gameState ? '?' : '+')}
            {data.isTeammate && <div className="absolute -top-1 -right-1 bg-blue-500 text-xs text-white px-1 rounded">友</div>}
            {data.isOpponent && <div className="absolute -top-1 -right-1 bg-red-500 text-xs text-white px-1 rounded">敌</div>}
-           {data.player && data.player.seatIndex === 0 && (
+           {data.player && data.player.isHost && (
                <div className="absolute -bottom-1 -right-1 text-xs bg-yellow-500 text-black px-1 rounded font-bold border border-white">
                    房主
                </div>
@@ -430,8 +437,16 @@ export const GameTable: React.FC<Props> = ({
       <PlayerArea data={left} pos="left-8 top-1/2 -translate-y-1/2" />
       <PlayerArea data={right} pos="right-8 top-1/2 -translate-y-1/2" />
       
-      {/* Chat Box */}
-      <div className="absolute top-4 right-4 w-72 h-56 bg-[#252526] border border-[#333333] rounded flex flex-col pointer-events-auto z-10 shadow-lg">
+      {/* Chat Box。默认收起，避免挡住右侧玩家。 */}
+      <button
+          type="button"
+          onClick={() => setShowChat(open => !open)}
+          className="absolute top-4 right-4 z-20 bg-[#252526] border border-[#333333] text-white text-sm px-3 py-1 rounded pointer-events-auto"
+      >
+          {showChat ? '收起聊天' : '聊天'}
+      </button>
+      {showChat && (
+      <div className="absolute top-14 right-4 w-72 max-h-56 bg-[#252526] border border-[#333333] rounded flex flex-col pointer-events-auto z-10 shadow-lg">
           <div className="flex-1 overflow-y-auto p-2 text-sm text-[#d4d4d4] scrollbar-thin">
               {chatMessages.map((msg, i) => (
                   <div key={i} className="mb-1">
@@ -480,6 +495,7 @@ export const GameTable: React.FC<Props> = ({
               <button type="submit" className="text-[#0e639c] font-bold text-sm hover:text-[#1177bb]">发送</button>
           </form>
       </div>
+      )}
 
       {gameState && (
           <div className="absolute top-4 left-4 flex flex-col gap-2 items-start z-50">
@@ -500,7 +516,7 @@ export const GameTable: React.FC<Props> = ({
               </div>
               
               {/* Host Force End Button */}
-              {me.player && me.player.seatIndex === 0 && (
+              {me.player && me.player.isHost && (
                 <button 
                     onClick={() => {
                         if (confirm('⚠️ 确定要强制结束当前游戏吗？所有进度将丢失。')) {
@@ -510,6 +526,15 @@ export const GameTable: React.FC<Props> = ({
                     className="bg-red-900/80 hover:bg-red-600 text-white text-xs px-3 py-1 rounded border border-red-500/50 shadow-lg backdrop-blur-sm transition-all flex items-center gap-1"
                 >
                     <span>⛔</span> 强制结束
+                </button>
+              )}
+              {me.player && (
+                <button
+                    type="button"
+                    onClick={onLeave}
+                    className="bg-[#252526] hover:bg-[#3c3c3c] text-white text-xs px-3 py-1 rounded border border-[#333333]"
+                >
+                    离开房间
                 </button>
               )}
           </div>
@@ -526,23 +551,23 @@ export const GameTable: React.FC<Props> = ({
                    <span className="text-[#9cdcfe] font-bold">模式:</span>
                    <button 
                        onClick={() => onSetGameMode?.(GameMode.Normal)}
-                       disabled={mySeat !== 0}
+                       disabled={!me.player?.isHost}
                        className={`px-4 py-1 rounded font-bold transition-all ${
                            roomState.gameMode !== GameMode.Skill 
                                ? 'bg-blue-600 text-white' 
                                : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
-                       } ${mySeat !== 0 ? 'cursor-not-allowed opacity-70' : ''}`}
+                       } ${!me.player?.isHost ? 'cursor-not-allowed opacity-70' : ''}`}
                    >
                        普通
                    </button>
                    <button 
                        onClick={() => onSetGameMode?.(GameMode.Skill)}
-                       disabled={mySeat !== 0}
+                       disabled={!me.player?.isHost}
                        className={`px-4 py-1 rounded font-bold transition-all ${
                            roomState.gameMode === GameMode.Skill 
                                ? 'bg-purple-600 text-white' 
                                : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
-                       } ${mySeat !== 0 ? 'cursor-not-allowed opacity-70' : ''}`}
+                       } ${!me.player?.isHost ? 'cursor-not-allowed opacity-70' : ''}`}
                    >
                        技能
                    </button>
@@ -551,11 +576,16 @@ export const GameTable: React.FC<Props> = ({
                    <div className="text-purple-400 text-sm">技能模式: 每人开局获得2张技能卡</div>
                )}
                
-               {me.player && !me.player.isReady && (
-                   <button onClick={onReady} className="bg-blue-500 text-white px-6 py-2 rounded font-bold">准备</button>
+               {me.player && !gameState && (
+                   <button onClick={onReady} className="bg-blue-500 text-white px-6 py-2 rounded font-bold">
+                       {me.player.isReady ? '取消准备' : '准备'}
+                   </button>
                )}
-               {me.player && me.player.seatIndex === 0 && (
+               {me.player && me.player.isHost && !gameState && (
                    <button onClick={onStart} className="bg-yellow-500 text-black px-6 py-2 rounded font-bold">开始游戏</button>
+               )}
+               {me.player && (
+                   <button onClick={onLeave} className="bg-gray-600 text-white px-6 py-2 rounded font-bold">离开房间</button>
                )}
             </div>
         )}
@@ -642,11 +672,14 @@ export const GameTable: React.FC<Props> = ({
                         {label}
                     </button>
                 ))}
+                {viewMode === 'arranged' && (
+                    <span className="text-xs text-gray-400 self-center">点组名选中整组</span>
+                )}
             </div>
         )}
 
         {/* Hand Area */}
-        <div className={`w-full max-w-[100vw] overflow-x-auto px-4 pointer-events-auto ${viewMode === 'stacked' ? 'h-64' : 'h-40'}`}>
+        <div className={`w-full max-w-[100vw] overflow-x-auto px-4 pt-8 pointer-events-auto ${viewMode === 'stacked' ? 'h-72' : 'h-52'}`}>
           {viewMode === 'arranged' ? (
               <div className="flex items-end justify-center gap-3 min-w-max mx-auto h-full">
                   {groups.map(group => (
@@ -654,7 +687,8 @@ export const GameTable: React.FC<Props> = ({
                           <button
                               type="button"
                               onClick={() => toggleGroup(group)}
-                              className="text-[10px] leading-none mb-1 text-yellow-300/90 hover:text-yellow-200"
+                              className="text-xs leading-none mb-1 text-yellow-200 hover:text-white"
+                              title="点此选中整组"
                           >
                               {group.label}
                           </button>
@@ -666,6 +700,7 @@ export const GameTable: React.FC<Props> = ({
                                       selected={selectedCardIds.includes(card.id)}
                                       onClick={() => toggleSelect(card.id)}
                                       isHighlighted={highlightedCardIds.has(card.id)}
+                                      hint={tributeHintIds.has(card.id)}
                                   />
                               ))}
                           </div>
@@ -681,6 +716,7 @@ export const GameTable: React.FC<Props> = ({
                   selected={selectedCardIds.includes(card.id)}
                   onClick={() => toggleSelect(card.id)}
                   isHighlighted={highlightedCardIds.has(card.id)}
+                  hint={tributeHintIds.has(card.id)}
                 />
               ))}
               </div>
@@ -707,6 +743,7 @@ export const GameTable: React.FC<Props> = ({
                                     onClick={() => toggleSelect(card.id)}
                                     small 
                                     isHighlighted={highlightedCardIds.has(card.id)}
+                                    hint={tributeHintIds.has(card.id)}
                                 />
                               </div>
                           ));
@@ -726,7 +763,10 @@ export const GameTable: React.FC<Props> = ({
               </div>
             </div>
           )}
-          <div className="text-white font-bold mt-2">{me.player?.name}（我）</div>
+          <div className="text-white font-bold mt-2 flex items-center gap-2">
+              <span>{me.player?.name}（我）</span>
+              {me.player?.isHost && <span className="text-xs bg-yellow-500 text-black px-1 rounded">房主</span>}
+          </div>
         </div>
       </div>
       

@@ -102,10 +102,41 @@ export class Game {
   
   rebindPlayer(p: Player) {
       if (!p.isBot && p.socket) {
-          // Remove old listeners? Socket is new, so no need to remove old ones from new socket.
-          // Old socket is dead.
+          const socket = p.socket;
+          socket.removeAllListeners('playHand');
+          socket.removeAllListeners('pass');
+          socket.removeAllListeners('tribute');
+          socket.removeAllListeners('returnTribute');
+          socket.removeAllListeners('useSkill');
           this.bindPlayerListeners(p);
       }
+  }
+
+  /** 给某一个玩家补发完整牌局，重连时用。 */
+  sendStateTo(p: Player) {
+      if (p.isBot || !p.socket) return;
+      p.socket.emit('gameState', this.statePayload(p.seatIndex));
+  }
+
+  private statePayload(idx: number) {
+      return {
+          phase: this.currentPhase,
+          level: this.level,
+          currentTurn: this.currentTurn,
+          hands: this.hands.map((h, i) => i === idx ? h : h.length),
+          lastHand: this.lastHand,
+          roundActions: this.roundActions,
+          winners: this.winners,
+          tributeState: this.currentPhase === GamePhase.Tribute || this.currentPhase === GamePhase.ReturnTribute ? this.tributeState : undefined,
+          teamLevels: this.teamLevels,
+          activeTeam: this.activeTeam,
+          gameMode: this.gameMode,
+          mySkillCards: this.skillCards[idx],
+          skipNextTurn: this.skipNextTurn,
+          newCardIds: this.newCardIds[idx] || [],
+          history: this.history,
+          currentRound: this.currentRound
+      };
   }
   
   bindPlayerListeners(p: Player) {
@@ -199,16 +230,13 @@ export class Game {
   start() {
     this.currentPhase = GamePhase.Dealing;
     
-    // First time start logic
+    // First time start logic. 局数由 Match 传入，这里不要每开一局都重置成 1。
+    if (this.currentRound < 1) this.currentRound = 1;
     if (this.prevWinners.length === 0 && this.winners.length === 0) {
-        // Fresh game
         this.activeTeam = 0;
         this.teamLevels = { 0: 2, 1: 2 };
-        this.currentRound = 1;
-        this.history = []; // Clear history for new match
+        this.history = [];
         this.historyIdCounter = 0;
-    } else {
-        this.currentRound++;
     }
 
     // Use Active Team Level
@@ -1060,27 +1088,7 @@ export class Game {
     this.players.forEach((p, idx) => {
         if (!p.isBot && p.socket) {
             const myNewCardIds = this.newCardIds[idx] || [];
-            p.socket.emit('gameState', {
-                phase: this.currentPhase,
-                level: this.level,
-                currentTurn: this.currentTurn,
-                hands: this.hands.map((h, i) => i === idx ? h : h.length),
-                lastHand: this.lastHand,
-                roundActions: this.roundActions,
-                winners: this.winners,
-                tributeState: this.currentPhase === GamePhase.Tribute || this.currentPhase === GamePhase.ReturnTribute ? this.tributeState : undefined,
-                teamLevels: this.teamLevels,
-                activeTeam: this.activeTeam,
-                // Skill mode data
-                gameMode: this.gameMode,
-                mySkillCards: this.skillCards[idx],  // Only send player's own skill cards
-                skipNextTurn: this.skipNextTurn,
-                // New cards highlight
-                newCardIds: myNewCardIds,
-                // Game history
-                history: this.history,
-                currentRound: this.currentRound
-            });
+            p.socket.emit('gameState', this.statePayload(idx));
             
             // Delay clearing newCardIds to give client time to display highlight
             if (myNewCardIds.length > 0) {
@@ -1176,38 +1184,30 @@ export class Game {
           if (skillDecision) {
               console.log(`[Bot] Seat ${seatIndex} decides to use skill: ${skillDecision.skill.type}`);
               this.handleUseSkill(seatIndex, skillDecision.skill.id, skillDecision.target);
-              // After using skill, schedule another bot turn for playing cards
-              const timeout = setTimeout(() => {
-                  if (!this.isActive) {
-                      console.log(`[Bot] Game no longer active, aborting bot turn for seat ${seatIndex}`);
-                      return;
-                  }
-                  this.handleBotTurn(seatIndex);
-              }, 1000);
-              this.registerTimeout(timeout);
+              // broadcastGameState 会给当前回合再排一次代打，这里不要再排一个定时器。
               return;
           }
       }
       
       const bot = new Bot(hand, this.level);
-      const move = bot.decideMove(this.lastHand ? this.lastHand.hand : null);
-      
-      console.log(`[Bot] Seat ${seatIndex} decides: ${move ? `Play ${move.length} cards` : 'Pass'}`);
-      
-      if (move) {
-          // Check if it's a bomb (4+ same cards or straight flush)
+      const target = this.lastHand && this.lastHand.playerIndex !== seatIndex ? this.lastHand.hand : null;
+      const rejected = new Set<string>();
+      let move: Card[] | null = null;
+      let played = false;
+      for (let attempt = 0; attempt < 12; attempt++) {
+          move = bot.decideMove(target, rejected);
+          if (!move) break;
+          rejected.add(move.map(card => card.id).sort().join(','));
+          played = this.handlePlayHand(seatIndex, move);
+          if (played) break;
+          console.log(`[Bot] Seat ${seatIndex} play rejected, trying another`);
+      }
+
+      console.log(`[Bot] Seat ${seatIndex} decides: ${played && move ? `Play ${move.length} cards` : 'Pass'}`);
+
+      if (played && move) {
           const handType = getHandType(move, this.level);
           const isBomb = handType && (handType.type === HandType.Bomb || handType.type === HandType.StraightFlush || handType.type === HandType.FourKings);
-          
-          const played = this.handlePlayHand(seatIndex, move);
-          if (!played) {
-              if (this.lastHand && this.lastHand.playerIndex !== seatIndex) {
-                  this.handlePass(seatIndex);
-              }
-              return;
-          }
-          
-          // Bot sends emoji based on action
           if (actor.isBot) {
               if (isBomb) {
                   this.botSendChat(seatIndex, 'bomb');
@@ -1217,9 +1217,14 @@ export class Game {
                   this.botSendChat(seatIndex, 'play');
               }
           }
-      } else {
+      } else if (target) {
           this.handlePass(seatIndex);
           if (actor.isBot) this.botSendChat(seatIndex, 'pass');
+      } else {
+          const smallest = [...hand].sort((a, b) => getLogicValue(a.rank, this.level) - getLogicValue(b.rank, this.level))[0];
+          if (smallest && this.handlePlayHand(seatIndex, [smallest])) {
+              if (actor.isBot) this.botSendChat(seatIndex, 'play');
+          }
       }
   }
   
@@ -1227,10 +1232,7 @@ export class Game {
       const mySkills = this.skillCards[seatIndex];
       if (mySkills.length === 0) return null;
       
-      const myTeam = seatIndex % 2;
-      const teammates = [0, 1, 2, 3].filter(i => i % 2 === myTeam && i !== seatIndex && this.hands[i].length > 0);
-      const opponents = [0, 1, 2, 3].filter(i => i % 2 !== myTeam && this.hands[i].length > 0);
-      const activePlayers = [0, 1, 2, 3].filter(i => this.hands[i].length > 0);
+      const opponents = [0, 1, 2, 3].filter(i => i % 2 !== seatIndex % 2 && this.hands[i].length > 0);
       
       const myHandSize = this.hands[seatIndex].length;
       
@@ -1276,8 +1278,8 @@ export class Game {
                   break;
                   
               case SkillCardType.Harvest:
-                  // Use if hand sizes are relatively balanced
-                  if (myHandSize < 15 && activePlayers.length >= 3) {
+                  // 只在对手快出完时用来拖一手。自己牌还多就不要用，否则开局不久就会把牌发一轮。
+                  if (opponents.some(seat => this.hands[seat].length > 0 && this.hands[seat].length <= 5) && myHandSize > 8) {
                       return { skill };
                   }
                   break;
@@ -1287,7 +1289,7 @@ export class Game {
       // Randomly use a skill 20% of the time if we have one
       if (Math.random() < 0.2 && mySkills.length > 0) {
           const skill = mySkills[0];
-          if ([SkillCardType.DrawTwo, SkillCardType.Harvest].includes(skill.type)) {
+          if (skill.type === SkillCardType.DrawTwo && myHandSize < 10) {
               return { skill };
           }
           if ([SkillCardType.Steal, SkillCardType.Discard, SkillCardType.Skip].includes(skill.type)) {
