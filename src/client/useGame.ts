@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { socket } from './socket';
 import { Card, GameMode, SkillCard, Hand, HistoryEntry } from '../shared/types';
+import { formatLevelRank } from '../shared/rules';
 
 export interface GameState {
   phase: string;
@@ -39,6 +40,10 @@ export function useGame() {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [mySeat, setMySeat] = useState<number>(-1);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [matchResult, setMatchResult] = useState<string | null>(null);
+  const errorTimer = useRef<number | undefined>(undefined);
+  const noticeTimer = useRef<number | undefined>(undefined);
   const [chatMessages, setChatMessages] = useState<{sender: string, text: string, time: string, seatIndex: number}[]>([]);
   const [roomList, setRoomList] = useState<Array<{
     id: string;
@@ -70,20 +75,27 @@ export function useGame() {
 
     socket.on('error', (msg: string) => {
       setError(msg);
-      setTimeout(() => setError(null), 3000);
+      window.clearTimeout(errorTimer.current);
+      errorTimer.current = window.setTimeout(() => setError(null), 3000);
+    });
+
+    socket.on('notice', (msg: string) => {
+      setNotice(msg);
+      window.clearTimeout(noticeTimer.current);
+      noticeTimer.current = window.setTimeout(() => setNotice(null), 4000);
     });
     
     socket.on('gameOver', (data: { winners: number[] }) => {
       console.log(`[Client] Game Over! Winners: ${data.winners.join(', ')}`);
-      // The gameState should already be updated via broadcastGameState
-      // This event is just a confirmation
-      // Note: Game will auto-restart after 3 seconds (handled by Match)
     });
     
-    socket.on('matchOver', (data: { winningTeam: number, winners: any[], finalLevels: any }) => {
-      console.log(`[Client] MATCH OVER! Team ${data.winningTeam} wins!`);
-      alert(`🎉 对局结束！\n获胜队伍：${data.winningTeam === 0 ? '0号和2号' : '1号和3号'}\n最终等级：${JSON.stringify(data.finalLevels)}`);
-      setGameState(null); // Clear game state to return to lobby
+    socket.on('matchOver', (data: { winningTeam: number, winners: any[], finalLevels: { [key: number]: number } }) => {
+      const side = data.winningTeam === 0 ? '座位 0 和 2' : '座位 1 和 3';
+      const levels = data.finalLevels
+        ? `打${formatLevelRank(data.finalLevels[0])} 对 打${formatLevelRank(data.finalLevels[1])}`
+        : '';
+      setMatchResult(`对局结束，${side} 获胜。${levels}`);
+      setGameState(null);
     });
 
     socket.on('gameTerminated', () => {
@@ -98,9 +110,12 @@ export function useGame() {
 
     return () => {
       socket.off('roomState');
+      socket.off('chatMessage');
       socket.off('gameState');
       socket.off('error');
+      socket.off('notice');
       socket.off('gameOver');
+      socket.off('matchOver');
       socket.off('gameTerminated');
       socket.off('roomList');
     };
@@ -165,8 +180,10 @@ export function useGame() {
     mySeat,
     setMySeat,
     error,
+    notice,
+    matchResult,
     chatMessages,
     roomList,
-    actions: { joinRoom, setReady, playHand, passTurn, startGame, payTribute, returnTribute, sendChat, switchSeat, setGameMode, useSkill, forceEndGame, fetchRoomList }
+    actions: { joinRoom, setReady, playHand, passTurn, startGame, payTribute, returnTribute, sendChat, switchSeat, setGameMode, useSkill, forceEndGame, fetchRoomList, dismissMatchResult: () => setMatchResult(null) }
   };
 }

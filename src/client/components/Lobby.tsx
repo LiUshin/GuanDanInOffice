@@ -53,33 +53,34 @@ export const Lobby: React.FC<Props> = ({ onJoin, roomList, onFetchRoomList }) =>
         {/* Join Form */}
         <form onSubmit={handleSubmit} className="bg-[#252526] p-8 rounded-lg shadow-xl border border-[#333333] text-gray-300 flex flex-col gap-4 w-80">
           <div>
-            <label className="block text-sm font-bold mb-2 text-[#9cdcfe]">Username</label>
+            <label className="block text-sm font-bold mb-2 text-[#9cdcfe]">昵称</label>
             <input
               type="text"
               value={name}
               onChange={e => setName(e.target.value)}
               className="w-full bg-[#3c3c3c] border border-[#3c3c3c] p-2 rounded text-white focus:outline-none focus:border-[#007acc]"
-              placeholder="Enter name..."
+              placeholder="输入名字"
               maxLength={10}
               required
             />
           </div>
           <div>
-            <label className="block text-sm font-bold mb-2 text-[#9cdcfe]">Room ID</label>
+            <label className="block text-sm font-bold mb-2 text-[#9cdcfe]">房间号</label>
             <input
               type="text"
               value={roomId}
               onChange={e => setRoomId(e.target.value)}
               className="w-full bg-[#3c3c3c] border border-[#3c3c3c] p-2 rounded text-white focus:outline-none focus:border-[#007acc]"
-              placeholder="Default: default"
+              placeholder="默认 default"
             />
           </div>
           <button 
             type="submit" 
             className="bg-[#0e639c] text-white py-2 rounded hover:bg-[#1177bb] font-bold mt-2"
           >
-            Connect
+            进入房间
           </button>
+          <p className="text-xs text-gray-500 text-center">牌局里按 i 切换摸鱼界面</p>
           
           <button
             type="button"

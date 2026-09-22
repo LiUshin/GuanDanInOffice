@@ -102,7 +102,7 @@ class Room {
             });
         }
         
-        this.io.to(this.id).emit('error', `Player ${name} reconnected!`);
+        this.io.to(this.id).emit('notice', `${name} 重新连接`);
         this.broadcastState();
         return;
     }
@@ -171,16 +171,10 @@ class Room {
       // Stop the match
       this.match.forceEndMatch();
       this.match = null;
-      
-      // Reset players ready status
-      this.players.forEach(p => {
-          if (p) {
-              p.isReady = false;
-          }
-      });
+      this.releaseBots();
       
       // Notify everyone
-      this.io.to(this.id).emit('error', '房主强制结束了对局');
+      this.io.to(this.id).emit('notice', '房主强制结束了对局');
       // Emit a special "matchTerminated" or just let the roomState update handle it?
       // The client relies on `gameState` event to enter game view. 
       // If we stop emitting gameState, client might get stuck if it doesn't know game ended.
@@ -203,7 +197,7 @@ class Room {
           return;
       }
       this.gameMode = mode;
-      this.io.to(this.id).emit('error', `游戏模式已切换为: ${mode === GameMode.Skill ? '技能模式' : '普通模式'}`);
+      this.io.to(this.id).emit('notice', `游戏模式已切换为: ${mode === GameMode.Skill ? '技能模式' : '普通模式'}`);
       this.broadcastState();
   }
 
@@ -258,14 +252,15 @@ class Room {
       // If match running, DO NOT end match immediately.
       // Allow reconnect.
       if (this.match && this.match.currentGame) {
-          this.io.to(this.id).emit('error', `Player ${playerName} disconnected (Waiting for reconnect...)`);
+          this.match.currentGame.noteDisconnected(index);
+          this.io.to(this.id).emit('notice', `${playerName} 断线，系统托管，等待重连`);
       } else {
            // If game not started, just notify
            // Should we remove player if game not started? 
            // Maybe yes, to free up seat? 
            // Let's remove if game not started.
            this.players[index] = null;
-           this.io.to(this.id).emit('error', `Player ${playerName} left the room`);
+           this.io.to(this.id).emit('notice', `${playerName} 离开了房间`);
       }
       this.broadcastState();
     }
@@ -317,13 +312,32 @@ class Room {
 
       // Start a new match (full game series from 2 to A)
       this.match = new Match(this.io, this.id, gamePlayers, this.gameMode);
+      this.match.onMatchEnd = () => this.releaseBots();
       this.match.startMatch();
       
       this.io.to(this.id).emit('matchStarted');
   }
 
+  /** 整场结束后清掉 Bot，并把仍在的玩家补到座位 0，避免没有房主。 */
+  private releaseBots() {
+      this.players = this.players.map(p => (p && p.isBot ? null : p));
+      if (!this.players[0]) {
+          const next = this.players.findIndex(p => p && !p.isBot);
+          if (next > 0) {
+              const player = this.players[next]!;
+              player.seatIndex = 0;
+              this.players[0] = player;
+              this.players[next] = null;
+          }
+      }
+      this.players.forEach(p => {
+          if (p) p.isReady = false;
+      });
+      this.broadcastState();
+  }
+
   broadcastState() {
-    const playerList = this.players.map(p => p ? { id: p.id, name: p.name, seatIndex: p.seatIndex, isReady: p.isReady, isBot: p.isBot } : null);
+    const playerList = this.players.map(p => p ? { id: p.id, name: p.name, seatIndex: p.seatIndex, isReady: p.isReady, isBot: p.isBot, isDisconnected: p.isDisconnected } : null);
     this.io.to(this.id).emit('roomState', {
       roomId: this.id,
       players: playerList,

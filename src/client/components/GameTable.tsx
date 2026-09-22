@@ -1,12 +1,15 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Card as CardType, Rank, Suit, GameMode, SkillCard, SkillCardType, Hand } from '../../shared/types';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Card as CardType, Rank, Suit, GameMode, SkillCard, SkillCardType, Hand, HandType } from '../../shared/types';
 import { Bot } from '../../shared/bot';
 import { Card } from './Card';
 import { GameState, RoomState } from '../useGame';
-import { getLogicValue, isConsecutive, getAllPossibleHandTypes, getHandDescription } from '../../shared/rules';
+import { getAllPossibleHandTypes, getHandDescription, sortCards, formatLevelRank } from '../../shared/rules';
+import { arrangeHand, CardGroup } from '../../shared/arrange';
 import { SkillCardButton } from './SkillCardButton';
 import { TargetSelectModal } from './TargetSelectModal';
 import { GameHistory } from './GameHistory';
+
+const EMPTY_HAND: CardType[] = [];
 
 interface Props {
   gameState: GameState | null;
@@ -33,7 +36,7 @@ export const GameTable: React.FC<Props> = ({
 }) => {
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState('');
-  const [viewMode, setViewMode] = useState<'normal' | 'stacked'>('normal'); 
+  const [viewMode, setViewMode] = useState<'arranged' | 'rank' | 'stacked'>('arranged'); 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   
@@ -127,64 +130,31 @@ export const GameTable: React.FC<Props> = ({
   const right = getPlayerAt(1);
   const me = getPlayerAt(0);
 
-  const myHandOriginal = gameState ? (gameState.hands[mySeat] as CardType[]) : [];
-  const [sortedHand, setSortedHand] = useState<CardType[]>([]);
-  const [straightFlushIds, setStraightFlushIds] = useState<Set<string>>(new Set());
+  const level = gameState?.level ?? 2;
+  const handCards = gameState && mySeat >= 0 && Array.isArray(gameState.hands[mySeat])
+    ? (gameState.hands[mySeat] as CardType[])
+    : EMPTY_HAND;
+  const groups = useMemo(() => arrangeHand(handCards, level), [handCards, level]);
+  const straightFlushIds = useMemo(() => {
+    const ids = new Set<string>();
+    groups.filter(g => g.type === HandType.StraightFlush).forEach(g => g.cards.forEach(c => ids.add(c.id)));
+    return ids;
+  }, [groups]);
+  const visibleCards = viewMode === 'rank' ? sortCards(handCards, level) : groups.flatMap(g => g.cards);
 
   useEffect(() => {
-      if (myHandOriginal.length > 0 && gameState) {
-          setSortedHand(myHandOriginal);
-          
-          // Detect Straight Flushes for Highlighting
-          const sfSet = new Set<string>();
-          // Logic: Group by Suit -> Sort by Rank -> Check consecutive 5+
-          const suits = [Suit.Spades, Suit.Hearts, Suit.Clubs, Suit.Diamonds];
-          
-          suits.forEach(s => {
-              const suitCards = myHandOriginal.filter(c => c.suit === s && !c.isWild && c.rank <= Rank.Ace);
-              // Sort by Rank Ascending
-              suitCards.sort((a, b) => a.rank - b.rank);
-              
-              // Find sequences
-              let seq: CardType[] = [];
-              for (let i = 0; i < suitCards.length; i++) {
-                  if (seq.length === 0) {
-                      seq.push(suitCards[i]);
-                  } else {
-                      const last = seq[seq.length - 1];
-                      if (suitCards[i].rank === last.rank + 1) {
-                          seq.push(suitCards[i]);
-                      } else if (suitCards[i].rank === last.rank) {
-                          // Duplicate rank? Skip or fork? 
-                          // For visualization, just highlight one path or all?
-                          // Simple: Reset sequence if gap
-                          // Actually duplicates break strict sequence check if we just use prev.
-                          // But if it is duplicate rank, we can still form SF if we have 5 unique ranks.
-                          // Simplification: Check strict consecutive ranks.
-                          // If gap > 1, reset.
-                      } else {
-                          // Gap
-                          if (seq.length >= 5) {
-                              seq.forEach(c => sfSet.add(c.id));
-                          }
-                          seq = [suitCards[i]];
-                      }
-                  }
-              }
-              if (seq.length >= 5) {
-                  seq.forEach(c => sfSet.add(c.id));
-              }
-          });
-          setStraightFlushIds(sfSet);
+    setSelectedCardIds(prev => {
+      const next = prev.filter(id => handCards.some(c => c.id === id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [handCards]);
 
-      } else {
-          setSortedHand([]);
-          setStraightFlushIds(new Set());
-      }
-  }, [myHandOriginal, gameState?.level]); 
-
-  const toggleViewMode = () => {
-      setViewMode(prev => prev === 'normal' ? 'stacked' : 'normal');
+  const toggleGroup = (group: CardGroup) => {
+    const ids = group.cards.map(c => c.id);
+    const allSelected = ids.every(id => selectedCardIds.includes(id));
+    setSelectedCardIds(prev => allSelected
+      ? prev.filter(id => !ids.includes(id))
+      : [...new Set([...prev, ...ids])]);
   };
 
   const toggleSelect = (id: string) => {
@@ -194,7 +164,7 @@ export const GameTable: React.FC<Props> = ({
   };
 
   const handlePlay = () => {
-    const cards = sortedHand.filter(c => selectedCardIds.includes(c.id));
+    const cards = visibleCards.filter(c => selectedCardIds.includes(c.id));
     
     // Check if cards contain wild cards
     const hasWild = cards.some(c => c.isWild);
@@ -211,27 +181,24 @@ export const GameTable: React.FC<Props> = ({
       } else if (possibilities.length === 1) {
         // Single interpretation - play directly
         onPlay(cards, possibilities[0]);
-        setSelectedCardIds([]);
         return;
       }
     }
     
     // No wild cards or no valid interpretation - play as normal
     onPlay(cards);
-    setSelectedCardIds([]);
   };
   
   const handleHandTypeSelect = (hand: Hand) => {
-    const cards = sortedHand.filter(c => selectedCardIds.includes(c.id));
+    const cards = visibleCards.filter(c => selectedCardIds.includes(c.id));
     onPlay(cards, hand);
-    setSelectedCardIds([]);
     setShowHandSelector(false);
     setPossibleHands([]);
   };
   
   const handleHint = () => {
       if (!gameState) return;
-      const bot = new Bot(sortedHand, gameState.level);
+      const bot = new Bot(visibleCards, gameState.level);
       const target = gameState.lastHand && gameState.lastHand.playerIndex !== mySeat ? gameState.lastHand.hand : null;
       const move = bot.decideMove(target);
       
@@ -243,14 +210,22 @@ export const GameTable: React.FC<Props> = ({
   };
   
   const handleTributeAction = () => {
-      const cards = sortedHand.filter(c => selectedCardIds.includes(c.id));
+      const cards = visibleCards.filter(c => selectedCardIds.includes(c.id));
       if (cards.length !== 1) {
           alert("请选择一张牌");
           return;
       }
       if (gameState.phase === 'Tribute' && onTribute) onTribute(cards);
-      if (gameState.phase === 'ReturnTribute' && onReturnTribute) onReturnTribute(cards);
-      setSelectedCardIds([]);
+      if (gameState.phase === 'ReturnTribute' && onReturnTribute) {
+          const card = cards[0];
+          const hasLegal = visibleCards.some(c => c.rank <= Rank.Ten && c.rank !== gameState.level);
+          const isLegal = card.rank <= Rank.Ten && card.rank !== gameState.level;
+          if (!isLegal && hasLegal) {
+              alert('还贡只能出 10 及以下，且不能是级牌或王');
+              return;
+          }
+          onReturnTribute(cards);
+      }
   };
   
   const handleChatSubmit = (e: React.FormEvent) => {
@@ -320,7 +295,7 @@ export const GameTable: React.FC<Props> = ({
              <Card key={c.id} card={c} />
            ))}
         </div>
-        <div className="text-yellow-300 font-bold mt-2">{hand.type}</div>
+        <div className="text-yellow-300 font-bold mt-2">{getHandDescription(hand, gameState.level)}</div>
       </div>
     );
   };
@@ -380,7 +355,7 @@ export const GameTable: React.FC<Props> = ({
            {data.isOpponent && <div className="absolute -top-1 -right-1 bg-red-500 text-xs text-white px-1 rounded">敌</div>}
            {data.player && data.player.seatIndex === 0 && (
                <div className="absolute -bottom-1 -right-1 text-xs bg-yellow-500 text-black px-1 rounded font-bold border border-white">
-                   Host
+                   房主
                </div>
            )}
            {/* Winner Position Badge */}
@@ -391,13 +366,13 @@ export const GameTable: React.FC<Props> = ({
            )}
          </div>
          <div className="text-white font-bold flex items-center gap-2">
-             {data.player ? data.player.name : (gameState ? 'Waiting...' : '点击入座')}
+             {data.player ? data.player.name : (gameState ? '等待中' : '点击入座')}
              {data.player && (data.player as any).isDisconnected && (
                  <span className="text-red-500 text-xs font-bold bg-white px-1 rounded animate-pulse">OFF</span>
              )}
          </div>
-         {gameState && <div className="text-yellow-400">Cards: {data.handCount}</div>}
-         {data.player && data.player.isReady && !gameState && <div className="text-green-400 text-sm">Ready</div>}
+         {gameState && <div className="text-yellow-400">剩余 {data.handCount}</div>}
+         {data.player && data.player.isReady && !gameState && <div className="text-green-400 text-sm">已准备</div>}
          
          {/* Show current round action */}
          {gameState && action && (
@@ -406,7 +381,7 @@ export const GameTable: React.FC<Props> = ({
                      <div className="text-gray-400 font-bold text-sm bg-gray-700/50 px-3 py-1 rounded">过</div>
                  ) : (
                      <div className="flex flex-col items-center">
-                         <div className="text-green-400 text-xs mb-1">{action.hand?.type || '出牌'}</div>
+                         <div className="text-green-400 text-xs mb-1">{action.hand ? getHandDescription(action.hand, gameState.level) : '出牌'}</div>
                          {renderActionCards(action.cards)}
                      </div>
                  )}
@@ -414,30 +389,18 @@ export const GameTable: React.FC<Props> = ({
          )}
          
          {gameState && gameState.currentTurn === data.seat && !action && (
-             <div className="animate-bounce text-red-500 font-bold mt-2">Thinking...</div>
+             data.seat === mySeat
+               ? <div className="text-yellow-300 font-bold mt-2">轮到你了</div>
+               : <div className="text-gray-300 font-bold mt-2">思考中</div>
          )}
       </div>
     );
   };
 
   const getStackedMatrix = () => {
-      if (!gameState) return [];
-      
-      const matrix: { [key: number]: { [key: number]: CardType } } = {};
-      const suits = [Suit.Spades, Suit.Hearts, Suit.Clubs, Suit.Diamonds, Suit.Joker];
-      
-      const presentValues = new Set<number>();
-      
-      sortedHand.forEach(c => {
-          const val = getLogicValue(c.rank, gameState.level);
-          presentValues.add(val);
-      });
-
-      const sortedVals = Array.from(presentValues).sort((a, b) => b - a);
-      
-      return sortedVals.map(val => {
-          const cardsOfRank = sortedHand.filter(c => getLogicValue(c.rank, gameState.level) === val);
-          
+      const columns: { key: string; slots: { [key: number]: CardType[] } }[] = [];
+      const pushColumn = (key: string, cards: CardType[]) => {
+          if (cards.length === 0) return;
           const slots: { [key: number]: CardType[] } = {
               [Suit.Joker]: [],
               [Suit.Spades]: [],
@@ -445,17 +408,18 @@ export const GameTable: React.FC<Props> = ({
               [Suit.Clubs]: [],
               [Suit.Diamonds]: []
           };
-          
-          cardsOfRank.forEach(c => {
-             if (c.rank === Rank.SmallJoker || c.rank === Rank.BigJoker) {
-                 slots[Suit.Joker].push(c);
-             } else {
-                 slots[c.suit].push(c);
-             }
+          cards.forEach(c => {
+              if (c.rank >= Rank.SmallJoker) slots[Suit.Joker].push(c);
+              else slots[c.suit].push(c);
           });
-          
-          return { val, slots };
-      });
+          columns.push({ key, slots });
+      };
+      pushColumn('big', handCards.filter(c => c.rank === Rank.BigJoker));
+      pushColumn('small', handCards.filter(c => c.rank === Rank.SmallJoker));
+      for (let rank = Rank.Ace; rank >= Rank.Two; rank--) {
+          pushColumn(String(rank), handCards.filter(c => c.rank === rank));
+      }
+      return columns;
   };
 
   return (
@@ -519,8 +483,20 @@ export const GameTable: React.FC<Props> = ({
 
       {gameState && (
           <div className="absolute top-4 left-4 flex flex-col gap-2 items-start z-50">
-              <div className="text-[#d4d4d4] font-bold text-xl bg-[#252526] border border-[#333333] px-4 py-2 rounded shadow-lg">
-                  <span className="text-[#569cd6]">const</span> <span className="text-[#9cdcfe]">Level</span> = <span className="text-[#b5cea8]">{gameState.level}</span>;
+              <div className="text-[#d4d4d4] font-bold bg-[#252526] border border-[#333333] px-4 py-2 rounded shadow-lg text-sm leading-6">
+                  <div className="text-lg">当前 打{formatLevelRank(gameState.level)}</div>
+                  {gameState.teamLevels && (
+                    <>
+                      <div>
+                        我方 打{formatLevelRank(gameState.teamLevels[mySeat >= 0 ? mySeat % 2 : 0])}
+                        {gameState.activeTeam === (mySeat >= 0 ? mySeat % 2 : 0) ? ' · 庄' : ''}
+                      </div>
+                      <div>
+                        对方 打{formatLevelRank(gameState.teamLevels[mySeat >= 0 ? 1 - (mySeat % 2) : 1])}
+                        {gameState.activeTeam === (mySeat >= 0 ? 1 - (mySeat % 2) : 1) ? ' · 庄' : ''}
+                      </div>
+                    </>
+                  )}
               </div>
               
               {/* Host Force End Button */}
@@ -543,7 +519,7 @@ export const GameTable: React.FC<Props> = ({
         {renderLastHand()}
         {!gameState && (
             <div className="flex flex-col gap-4 mt-8 items-center">
-               <div className="text-white text-xl">Waiting for players...</div>
+               <div className="text-white text-xl">等待玩家入座</div>
                
                {/* Game Mode Toggle - Only host can change */}
                <div className="flex items-center gap-4 bg-[#252526] px-4 py-2 rounded-lg border border-[#333333]">
@@ -579,20 +555,13 @@ export const GameTable: React.FC<Props> = ({
                    <button onClick={onReady} className="bg-blue-500 text-white px-6 py-2 rounded font-bold">准备</button>
                )}
                {me.player && me.player.seatIndex === 0 && (
-                   <button onClick={onStart} className="bg-yellow-500 text-black px-6 py-2 rounded font-bold">开始游戏 (Host)</button>
+                   <button onClick={onStart} className="bg-yellow-500 text-black px-6 py-2 rounded font-bold">开始游戏</button>
                )}
             </div>
         )}
       </div>
 
       <div className="absolute bottom-0 w-full flex flex-col items-center pb-4 z-20 pointer-events-none">
-        {/* Debug Info - remove in production */}
-        {gameState && (
-            <div className="text-xs text-gray-500 mb-1 pointer-events-auto">
-                [Debug] mySeat={mySeat}, currentTurn={gameState.currentTurn}, phase={gameState.phase}, isMyTurn={String(gameState.currentTurn === mySeat)}, myCards={Array.isArray(gameState.hands[mySeat]) ? (gameState.hands[mySeat] as any[]).length : '?'}
-            </div>
-        )}
-        
         {/* Skill Cards Area */}
         {gameState && gameState.gameMode === GameMode.Skill && gameState.mySkillCards && gameState.mySkillCards.length > 0 && (
             <div className="mb-4 pointer-events-auto flex flex-col items-center">
@@ -616,13 +585,9 @@ export const GameTable: React.FC<Props> = ({
         {/* Controls Container */}
         <div className="mb-8 pointer-events-auto">
             {gameState && gameState.currentTurn === mySeat && gameState.phase === 'Playing' && (
+                <div className="flex flex-col items-center gap-3">
+                <div className="text-yellow-300 font-bold text-lg">轮到你了</div>
                 <div className="flex gap-4">
-                    <button 
-                      onClick={toggleViewMode}
-                      className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-full font-bold shadow-lg mr-4"
-                    >
-                      {viewMode === 'normal' ? '切换同花顺视图' : '切换普通视图'}
-                    </button>
                     <button 
                       onClick={handleHint}
                       className="bg-yellow-500 hover:bg-yellow-600 text-black px-4 py-2 rounded-full font-bold shadow-lg mr-4"
@@ -638,17 +603,19 @@ export const GameTable: React.FC<Props> = ({
                     </button>
                     <button 
                       onClick={onPass}
-                      className="bg-red-600 hover:bg-red-700 text-white px-8 py-2 rounded-full font-bold shadow-lg"
+                      disabled={!gameState.lastHand || gameState.lastHand.playerIndex === mySeat}
+                      className="bg-red-600 hover:bg-red-700 text-white px-8 py-2 rounded-full font-bold shadow-lg disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       过
                     </button>
+                </div>
                 </div>
             )}
             
             {amIPaying && (
                 <div className="flex gap-4">
                    <div className="text-yellow-400 font-bold text-xl animate-pulse">
-                       {gameState!.phase === 'Tribute' ? '请进贡最大牌' : '请还贡一张牌'}
+                       {gameState!.phase === 'Tribute' ? '请进贡最大牌' : '还贡 10 及以下，不能是级牌或王'}
                    </div>
                    <button 
                       onClick={handleTributeAction} 
@@ -660,11 +627,54 @@ export const GameTable: React.FC<Props> = ({
             )}
         </div>
 
-        {/* Hand Area - Compact Grid */}
-        <div className={`px-8 flex items-end justify-center pointer-events-auto transition-all duration-300 ${viewMode === 'normal' ? 'h-32 -space-x-8' : 'h-64 gap-1'}`}>
-          {viewMode === 'normal' ? (
-              // Normal View
-              sortedHand.map((card: CardType) => (
+        {gameState && handCards.length > 0 && (
+            <div className="mb-2 pointer-events-auto flex gap-2">
+                {([
+                    ['arranged', '理牌'],
+                    ['rank', '点数'],
+                    ['stacked', '同花顺'],
+                ] as const).map(([mode, label]) => (
+                    <button
+                        key={mode}
+                        onClick={() => setViewMode(mode)}
+                        className={`px-3 py-1 rounded-full text-sm font-bold ${viewMode === mode ? 'bg-yellow-500 text-black' : 'bg-gray-600 text-white hover:bg-gray-500'}`}
+                    >
+                        {label}
+                    </button>
+                ))}
+            </div>
+        )}
+
+        {/* Hand Area */}
+        <div className={`w-full max-w-[100vw] overflow-x-auto px-4 pointer-events-auto ${viewMode === 'stacked' ? 'h-64' : 'h-40'}`}>
+          {viewMode === 'arranged' ? (
+              <div className="flex items-end justify-center gap-3 min-w-max mx-auto h-full">
+                  {groups.map(group => (
+                      <div key={group.id} className="flex flex-col items-center">
+                          <button
+                              type="button"
+                              onClick={() => toggleGroup(group)}
+                              className="text-[10px] leading-none mb-1 text-yellow-300/90 hover:text-yellow-200"
+                          >
+                              {group.label}
+                          </button>
+                          <div className="flex -space-x-8">
+                              {group.cards.map(card => (
+                                  <Card
+                                      key={card.id}
+                                      card={card}
+                                      selected={selectedCardIds.includes(card.id)}
+                                      onClick={() => toggleSelect(card.id)}
+                                      isHighlighted={highlightedCardIds.has(card.id)}
+                                  />
+                              ))}
+                          </div>
+                      </div>
+                  ))}
+              </div>
+          ) : viewMode === 'rank' ? (
+              <div className="flex items-end justify-center -space-x-8 min-w-max mx-auto h-full">
+              {visibleCards.map((card: CardType) => (
                 <Card 
                   key={card.id} 
                   card={card} 
@@ -672,10 +682,11 @@ export const GameTable: React.FC<Props> = ({
                   onClick={() => toggleSelect(card.id)}
                   isHighlighted={highlightedCardIds.has(card.id)}
                 />
-              ))
+              ))}
+              </div>
           ) : (
-              // Stacked Matrix View (Compact columns)
-              getStackedMatrix().map((col, cIdx) => (
+              <div className="flex items-end justify-center gap-1 min-w-max mx-auto h-full">
+              {getStackedMatrix().map((col, cIdx) => (
                   <div key={cIdx} className="relative w-16 h-64 flex-shrink-0">
                       {[Suit.Joker, Suit.Spades, Suit.Hearts, Suit.Clubs, Suit.Diamonds].map((suit, sIdx) => {
                           const cards = col.slots[suit];
@@ -701,7 +712,8 @@ export const GameTable: React.FC<Props> = ({
                           ));
                       })}
                   </div>
-              ))
+              ))}
+              </div>
           )}
         </div>
         <div className="relative">
@@ -714,7 +726,7 @@ export const GameTable: React.FC<Props> = ({
               </div>
             </div>
           )}
-          <div className="text-white font-bold mt-2">{me.player?.name} (Me)</div>
+          <div className="text-white font-bold mt-2">{me.player?.name}（我）</div>
         </div>
       </div>
       
@@ -729,7 +741,8 @@ export const GameTable: React.FC<Props> = ({
               </div>
               {gameState.teamLevels && (
                   <div className="text-xl text-gray-300 mb-4">
-                      当前等级 - 队伍0: {gameState.teamLevels[0]} | 队伍1: {gameState.teamLevels[1]}
+                      我方 打{formatLevelRank(gameState.teamLevels[mySeat >= 0 ? mySeat % 2 : 0])}
+                      {' '}| 对方 打{formatLevelRank(gameState.teamLevels[mySeat >= 0 ? 1 - (mySeat % 2) : 1])}
                   </div>
               )}
               <div className="text-lg text-yellow-300 animate-pulse">
@@ -746,7 +759,7 @@ export const GameTable: React.FC<Props> = ({
           <div className="absolute inset-0 bg-black/80 flex items-center justify-center z-50">
               <div className="bg-[#252526] border border-[#333333] rounded-lg p-6 max-w-md shadow-2xl">
                   <h2 className="text-2xl font-bold text-[#9cdcfe] mb-4">选择牌型</h2>
-                  <p className="text-gray-400 mb-4">您的牌包含红心{gameState.level}（万能牌），可以组成以下牌型：</p>
+                  <p className="text-gray-400 mb-4">您的牌包含红心{formatLevelRank(gameState.level)}（万能牌），可以组成以下牌型：</p>
                   <div className="flex flex-col gap-3">
                       {possibleHands.map((hand, idx) => (
                           <button
@@ -756,8 +769,8 @@ export const GameTable: React.FC<Props> = ({
                           >
                               <div className="text-lg">{getHandDescription(hand, gameState.level)}</div>
                               <div className="text-sm text-gray-400 mt-1">
-                                  {hand.type} - 值: {hand.value}
-                                  {hand.bombCount && ` (${hand.bombCount}张炸弹)`}
+                                  点数 {hand.value}
+                                  {hand.bombCount ? ` · ${hand.bombCount}张` : ''}
                               </div>
                           </button>
                       ))}

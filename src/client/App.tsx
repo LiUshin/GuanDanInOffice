@@ -11,6 +11,8 @@ function App() {
     gameState, 
     mySeat, 
     error,
+    notice,
+    matchResult,
     chatMessages,
     roomList,
     actions 
@@ -36,9 +38,20 @@ function App() {
     <div className="bg-[#1e1e1e] min-h-screen text-gray-300">
       {showFakeIDE && <FakeIDE />}
       
+      {notice && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-[#264f78] text-white px-6 py-2 rounded-full shadow-lg z-50 font-bold">
+          {notice}
+        </div>
+      )}
       {error && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-red-500 text-white px-6 py-2 rounded-full shadow-lg z-50 font-bold animate-pulse">
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 bg-red-500 text-white px-6 py-2 rounded-full shadow-lg z-50 font-bold">
           {error}
+        </div>
+      )}
+      {matchResult && !gameState && (
+        <div className="fixed top-28 left-1/2 -translate-x-1/2 z-50 bg-amber-400 text-black px-6 py-3 rounded-lg shadow-lg font-bold flex items-center gap-4">
+          <span>{matchResult}</span>
+          <button type="button" onClick={actions.dismissMatchResult} className="underline">知道了</button>
         </div>
       )}
 

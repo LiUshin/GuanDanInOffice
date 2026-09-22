@@ -1,6 +1,6 @@
 import { Server, Socket } from 'socket.io';
 import { createDeck, shuffleDeck, updateCardProperties } from '../shared/deck';
-import { getHandType, compareHands, sortCards, getLargestCard, getLogicValue } from '../shared/rules';
+import { getHandType, compareHands, sortCards, getLargestCard, getLogicValue, getHandDescription } from '../shared/rules';
 import { Card, Hand, HandType, GameMode, SkillCard, SkillCardType, Suit, Rank, HistoryEntry, HistoryEventType } from '../shared/types';
 import { Bot } from '../shared/bot';
 
@@ -10,6 +10,22 @@ interface Player {
   socket?: Socket;
   seatIndex: number;
   isBot?: boolean;
+  isDisconnected?: boolean;
+}
+
+/**
+ * 双下时给还没出完的两人排三游、末游。
+ * 剩余牌少的在前；牌数相同则离二游顺时针更近的在前。
+ */
+export function rankUnfinishedPlayers(handSizes: number[], finished: number[]): number[] {
+  const anchor = finished[finished.length - 1] ?? 0;
+  const losers = [0, 1, 2, 3].filter(seat => !finished.includes(seat));
+  return losers.sort((a, b) => {
+    const byCount = handSizes[a] - handSizes[b];
+    if (byCount !== 0) return byCount;
+    const distance = (seat: number) => (seat - anchor + 4) % 4;
+    return distance(a) - distance(b);
+  });
 }
 
 enum GamePhase {
@@ -328,7 +344,7 @@ export class Game {
           this.currentPhase = GamePhase.Playing;
           this.currentTurn = p1;
           // Notify? Ideally send message.
-          this.io.to(this.roomId).emit('error', '抗贡成功！双大王在手，免除进贡！');
+          this.io.to(this.roomId).emit('notice', '抗贡成功！双大王在手，免除进贡！');
           return;
       }
       
@@ -351,41 +367,120 @@ export class Game {
       }
   }
   
+  /** 10 及以下，且不是级牌、大小王。 */
+  private isLegalReturnCard(card: Card): boolean {
+      if (card.rank > Rank.Ten) return false;
+      if (card.rank === this.level) return false;
+      return true;
+  }
+
+  /** 有合法牌时还最小的合法牌；一手都是级牌/大牌/王时还逻辑点数最小的一张。 */
+  private pickReturnCard(hand: Card[]): Card | null {
+      if (hand.length === 0) return null;
+      const legal = hand.filter(c => this.isLegalReturnCard(c));
+      const pool = legal.length > 0 ? legal : hand;
+      return sortCards(pool, this.level)[pool.length - 1];
+  }
+
+  private transferCard(from: number, to: number, card: Card) {
+      this.hands[from] = this.hands[from].filter(c => c.id !== card.id);
+      this.hands[to].push(card);
+      this.hands[to] = sortCards(this.hands[to], this.level);
+  }
+
+  /** 进贡牌最大者先出。点数相同则末游优先（pending 里末游在前，相等不覆盖）。 */
+  private resolveTributeStarter(): number {
+      let maxVal = -1;
+      let maxPayer = this.prevWinners[this.prevWinners.length - 1];
+      for (const t of this.tributeState.pendingTributes) {
+          if (!t.card) continue;
+          const val = getLogicValue(t.card.rank, this.level);
+          if (val > maxVal) {
+              maxVal = val;
+              maxPayer = t.from;
+          }
+      }
+      return maxPayer;
+  }
+
+  private beginReturnPhase() {
+      this.tributeState.nextStartPlayer = this.resolveTributeStarter();
+      this.currentPhase = GamePhase.ReturnTribute;
+      this.tributeState.pendingReturns = this.tributeState.pendingTributes.map(t => ({
+          from: t.to,
+          to: t.from
+      }));
+      this.tributeState.pendingTributes = [];
+      this.autoReturnForBots();
+      this.checkReturnDone();
+  }
+
+  private autoReturnForBots() {
+      this.tributeState.pendingReturns.forEach(r => {
+          if (r.card) return;
+          const player = this.players[r.from];
+          if (!this.isAutoPlayer(player)) return;
+          const card = this.pickReturnCard(this.hands[r.from]);
+          if (!card) return;
+          r.card = card;
+          this.transferCard(r.from, r.to, card);
+          this.addHistoryEntry(
+              HistoryEventType.ReturnTribute,
+              `${player.name} 向 ${this.players[r.to].name} 还贡: ${this.getCardDescription([card])}`,
+              r.from,
+              { card, to: r.to }
+          );
+      });
+  }
+
   processAutoTribute() {
       this.tributeState.pendingTributes.forEach(t => {
-           const player = this.players[t.from];
-           if (player.isBot) {
-               const hand = this.hands[t.from];
-               const largest = getLargestCard(hand, this.level);
-               t.card = largest;
-               this.hands[t.from] = this.hands[t.from].filter(c => c.id !== largest.id);
-               this.hands[t.to].push(largest);
-               this.hands[t.to] = sortCards(this.hands[t.to], this.level);
-           }
+          if (t.card) return;
+          const player = this.players[t.from];
+          if (!this.isAutoPlayer(player)) return;
+          const largest = getLargestCard(this.hands[t.from], this.level);
+          t.card = largest;
+          this.transferCard(t.from, t.to, largest);
+          this.addHistoryEntry(
+              HistoryEventType.Tribute,
+              `${player.name} 向 ${this.players[t.to].name} 进贡: ${this.getCardDescription([largest])}`,
+              t.from,
+              { card: largest, to: t.to }
+          );
       });
-      
-      const allDone = this.tributeState.pendingTributes.every(t => t.card);
-      if (allDone) {
-          this.currentPhase = GamePhase.ReturnTribute;
-          this.tributeState.pendingReturns = this.tributeState.pendingTributes.map(t => ({
-              from: t.to,
-              to: t.from
-          }));
-          this.tributeState.pendingTributes = []; 
-          
-           this.tributeState.pendingReturns.forEach(r => {
-               const player = this.players[r.from];
-               if (player.isBot) {
-                   const hand = this.hands[r.from];
-                   const smallest = hand[hand.length - 1]; 
-                   r.card = smallest;
-                   this.hands[r.from] = this.hands[r.from].filter(c => c.id !== smallest.id);
-                   this.hands[r.to].push(smallest);
-                   this.hands[r.to] = sortCards(this.hands[r.to], this.level);
-               }
-           });
-           
-           this.checkReturnDone();
+
+      if (this.tributeState.pendingTributes.every(t => t.card)) {
+          this.beginReturnPhase();
+      } else {
+          this.broadcastGameState();
+      }
+  }
+
+  private isAutoPlayer(player?: Player): boolean {
+      return !!player && (!!player.isBot || !!player.isDisconnected);
+  }
+
+  /** 玩家掉线后，出牌、进贡、还贡改由系统代打，直到他重连。 */
+  noteDisconnected(seat: number) {
+      const player = this.players[seat];
+      if (!player || player.isBot) return;
+      player.isDisconnected = true;
+      this.addHistoryEntry(
+          HistoryEventType.PhaseChange,
+          `${player.name} 断线，系统托管出牌`,
+          seat
+      );
+      if (this.currentPhase === GamePhase.Tribute) {
+          this.processAutoTribute();
+          return;
+      }
+      if (this.currentPhase === GamePhase.ReturnTribute) {
+          this.autoReturnForBots();
+          this.checkReturnDone();
+          return;
+      }
+      if (this.currentPhase === GamePhase.Playing && this.currentTurn === seat && this.winners.length < 3) {
+          this.scheduleAutoTurn(seat);
       }
   }
 
@@ -395,83 +490,35 @@ export class Game {
       
       const tribute = this.tributeState.pendingTributes.find(t => t.from === seatIndex && !t.card);
       if (!tribute) return;
-      
-      // Verify largest
+
       const hand = this.hands[seatIndex];
+      const serverCard = hand.find(c => c.id === cards[0].id);
+      if (!serverCard) {
+          this.emitError(seatIndex, '你没有这张牌');
+          return;
+      }
+      
       const largest = getLargestCard(hand, this.level);
-      const valPlay = getLogicValue(cards[0].rank, this.level);
+      const valPlay = getLogicValue(serverCard.rank, this.level);
       const valMax = getLogicValue(largest.rank, this.level);
       
       if (valPlay < valMax) {
-           this.emitError(seatIndex, 'Must pay the largest card');
+           this.emitError(seatIndex, '必须进贡最大的牌');
            return;
       }
       
-      tribute.card = cards[0];
-      this.hands[seatIndex] = this.hands[seatIndex].filter(c => c.id !== cards[0].id);
-      this.hands[tribute.to].push(cards[0]);
-      this.hands[tribute.to] = sortCards(this.hands[tribute.to], this.level);
+      tribute.card = serverCard;
+      this.transferCard(seatIndex, tribute.to, serverCard);
       
-      // Add history entry for tribute
       this.addHistoryEntry(
           HistoryEventType.Tribute,
-          `${this.players[seatIndex].name} 向 ${this.players[tribute.to].name} 进贡: ${this.getCardDescription([cards[0]])}`,
+          `${this.players[seatIndex].name} 向 ${this.players[tribute.to].name} 进贡: ${this.getCardDescription([serverCard])}`,
           seatIndex,
-          { card: cards[0], to: tribute.to }
+          { card: serverCard, to: tribute.to }
       );
       
-      const allDone = this.tributeState.pendingTributes.every(t => t.card);
-      if (allDone) {
-          // Determine who goes first in next round (Playing Phase)
-          // Rule: "The one who paid the largest tribute goes first"
-          // If equal? (e.g. both paid Heart 5?) -> Usually the one who paid to First Place? Or downstream order?
-          // Rule: If single tribute, payer goes first.
-          // If double tribute: Compare tribute cards. Largest payer goes first.
-          // If equal max tribute cards? Payer to P1 goes first? Or P4 (Last place) goes first?
-          // Common Rule: Payer of largest card. If equal, Last Place (p4) goes first.
-          
-          let nextTurn = -1;
-          
-          // Logic for next turn needs to be stored for after Return Tribute
-          // Actually, currentTurn updates when entering Playing phase.
-          // We can calculate it now and store it? 
-          // Wait, Return Tribute phase happens next. We shouldn't set currentTurn for Playing yet.
-          // But we need to know who starts.
-          
-          // Compare tribute cards
-          let maxVal = -1;
-          let maxPayer = -1;
-          
-          this.tributeState.pendingTributes.forEach(t => {
-              if (t.card) {
-                  const val = getLogicValue(t.card.rank, this.level);
-                  if (val > maxVal) {
-                      maxVal = val;
-                      maxPayer = t.from;
-                  } else if (val === maxVal) {
-                      // Tie breaker: Usually Last Place (p4) has priority if ties with 3rd place?
-                      // Or 3rd place?
-                      // Let's stick to: If tie, the one who paid to First Winner (P1) gets priority? 
-                      // Actually rules say: "If tribute cards are equal, the tributer to the first winner goes first" (Some rules)
-                      // OR "Last place goes first"
-                      // Let's assume maxPayer updates only if STRICTLY greater, so first one found keeps it.
-                      // Order is p4->p1, p3->p2. So p4 is checked first.
-                      // If p3 pays same value, maxVal is same, maxPayer stays p4.
-                      // So p4 (Last place) wins tie.
-                  }
-              }
-          });
-          
-          // Store this for later use in checkReturnDone
-          this.tributeState.nextStartPlayer = maxPayer;
-
-          this.currentPhase = GamePhase.ReturnTribute;
-          this.tributeState.pendingReturns = this.tributeState.pendingTributes.map(t => ({
-              from: t.to,
-              to: t.from
-          }));
-          this.tributeState.pendingTributes = [];
-          this.broadcastGameState();
+      if (this.tributeState.pendingTributes.every(t => t.card)) {
+          this.beginReturnPhase();
       } else {
           this.broadcastGameState();
       }
@@ -483,155 +530,147 @@ export class Game {
       
       const ret = this.tributeState.pendingReturns.find(r => r.from === seatIndex && !r.card);
       if (!ret) return;
+
+      const hand = this.hands[seatIndex];
+      const serverCard = hand.find(c => c.id === cards[0].id);
+      if (!serverCard) {
+          this.emitError(seatIndex, '你没有这张牌');
+          return;
+      }
+
+      const hasLegal = hand.some(c => this.isLegalReturnCard(c));
+      if (hasLegal && !this.isLegalReturnCard(serverCard)) {
+          this.emitError(seatIndex, '还贡只能出 10 及以下，且不能是级牌或王');
+          return;
+      }
+      if (!hasLegal) {
+          const smallest = this.pickReturnCard(hand);
+          if (!smallest || getLogicValue(serverCard.rank, this.level) > getLogicValue(smallest.rank, this.level)) {
+              this.emitError(seatIndex, '没有可还的小牌时，必须还最小的一张');
+              return;
+          }
+      }
       
-      ret.card = cards[0];
-      this.hands[seatIndex] = this.hands[seatIndex].filter(c => c.id !== cards[0].id);
-      this.hands[ret.to].push(cards[0]);
-      this.hands[ret.to] = sortCards(this.hands[ret.to], this.level);
+      ret.card = serverCard;
+      this.transferCard(seatIndex, ret.to, serverCard);
       
-      // Add history entry for return tribute
       this.addHistoryEntry(
           HistoryEventType.ReturnTribute,
-          `${this.players[seatIndex].name} 向 ${this.players[ret.to].name} 还贡: ${this.getCardDescription([cards[0]])}`,
+          `${this.players[seatIndex].name} 向 ${this.players[ret.to].name} 还贡: ${this.getCardDescription([serverCard])}`,
           seatIndex,
-          { card: cards[0], to: ret.to }
+          { card: serverCard, to: ret.to }
       );
       
       this.checkReturnDone();
-      this.broadcastGameState();
   }
   
   checkReturnDone() {
       const allDone = this.tributeState.pendingReturns.every(r => r.card);
       if (allDone) {
           this.currentPhase = GamePhase.Playing;
-          // Set start player based on tribute result
           if (this.tributeState.nextStartPlayer !== undefined) {
               this.currentTurn = this.tributeState.nextStartPlayer;
           } else {
-              // Fallback (Shouldn't happen if tribute occurred)
               this.currentTurn = this.prevWinners[0];
           }
-          this.tributeState = { pendingTributes: [], pendingReturns: [] }; // Clear
-          this.broadcastGameState();
+          this.tributeState = { pendingTributes: [], pendingReturns: [] };
       }
+      this.broadcastGameState();
   }
 
-  handlePlayHand(seatIndex: number, cards: Card[], providedHandType?: Hand) {
-      if (this.currentPhase !== GamePhase.Playing) return;
-      if (this.currentTurn !== seatIndex) return;
-      
-      // Use provided hand type if available, otherwise infer it
-      let hand: Hand | null;
-      if (providedHandType) {
-          // Validate that the provided hand type is actually valid for these cards
-          const inferredHand = getHandType(cards, this.level);
-          if (!inferredHand) {
-              this.emitError(seatIndex, 'Invalid hand');
-              return;
+  /** 用手里的服务器牌对象出牌，忽略客户端自报的牌型和 isWild。 */
+  handlePlayHand(seatIndex: number, cards: Card[], _providedHandType?: Hand): boolean {
+      if (!this.isActive) return false;
+      if (this.currentPhase !== GamePhase.Playing) return false;
+      if (this.currentTurn !== seatIndex) return false;
+
+      const playerHand = this.hands[seatIndex];
+      const serverCards: Card[] = [];
+      for (const c of cards) {
+          const found = playerHand.find(ph => ph.id === c.id);
+          if (!found || serverCards.some(s => s.id === found.id)) {
+              this.emitError(seatIndex, 'You do not have these cards');
+              return false;
           }
-          // Use the provided interpretation
-          hand = providedHandType;
-      } else {
-          hand = getHandType(cards, this.level);
-          if (!hand) {
-              this.emitError(seatIndex, 'Invalid hand');
-              return;
-          }
+          serverCards.push(found);
+      }
+
+      const hand = getHandType(serverCards, this.level);
+      if (!hand) {
+          this.emitError(seatIndex, 'Invalid hand');
+          return false;
       }
       
       // Debug Log
       console.log(`Player ${seatIndex} plays. Level: ${this.level}. Hand: ${hand.type} (Val: ${hand.value}). LastHand: ${this.lastHand ? `${this.lastHand.hand.type} (Val: ${this.lastHand.hand.value})` : 'None'}`);
 
       if (this.lastHand && this.lastHand.playerIndex !== seatIndex) {
-          // Compare
           const result = compareHands(hand, this.lastHand.hand);
           if (result <= 0) {
                console.log(`Compare failed: ${result}`);
                this.emitError(seatIndex, 'Hand not big enough');
-               return;
+               return false;
           }
       }
-      
-      const playerHand = this.hands[seatIndex];
-      // Check if cards exist in hand (by ID)
-      const validCards = cards.every(c => playerHand.some(ph => ph.id === c.id));
-      if (!validCards) {
-           this.emitError(seatIndex, 'You do not have these cards');
-           return;
-      }
 
-      // Remove cards
-      const newHand = playerHand.filter(c => !cards.some(played => played.id === c.id));
-      this.hands[seatIndex] = newHand;
+      const playedIds = new Set(serverCards.map(c => c.id));
+      this.hands[seatIndex] = playerHand.filter(c => !playedIds.has(c.id));
       
       this.lastHand = { playerIndex: seatIndex, hand };
       this.passCount = 0;
       
       // Reset round actions when someone plays (new round starts)
       this.roundActions = {};
-      this.roundActions[seatIndex] = { type: 'play', cards: cards, hand: hand };
+      this.roundActions[seatIndex] = { type: 'play', cards: serverCards, hand: hand };
       
       // Add history entry
-      const handTypeName = {
-          'Single': '单牌', 'Pair': '对子', 'Trips': '三张', 'TripsWithPair': '三带二',
-          'Straight': '顺子', 'Tube': '钢板', 'Plate': '连对', 
-          'Bomb': '炸弹', 'StraightFlush': '同花顺', 'FourKings': '四大天王'
-      }[hand.type] || hand.type;
+      const handTypeName = getHandDescription(hand, this.level);
       this.addHistoryEntry(
           HistoryEventType.Play,
-          `${this.players[seatIndex].name} 出牌: ${handTypeName} (${this.getCardDescription(cards)})`,
+          `${this.players[seatIndex].name} 出牌: ${handTypeName} (${this.getCardDescription(serverCards)})`,
           seatIndex,
-          { cards, handType: hand.type, cardsCount: cards.length }
+          { cards: serverCards, handType: hand.type, cardsCount: serverCards.length }
       );
       
-      if (this.hands[seatIndex].length === 0) {
-          this.winners.push(seatIndex);
-          
-          // Add history entry for player finish
-          const position = ['第一名', '第二名', '第三名', '第四名'][this.winners.length - 1];
-          this.addHistoryEntry(
-              HistoryEventType.PlayerFinish,
-              `${this.players[seatIndex].name} 出完所有牌，获得${position}！`,
-              seatIndex,
-              { position: this.winners.length }
-          );
-          
-          // Check Double Win (First two winners are same team)
-          if (this.winners.length === 2) {
-              const p1 = this.winners[0];
-              const p2 = this.winners[1];
-              if ((p1 % 2) === (p2 % 2)) {
-                  // Double Win!
-                  const losers = [0, 1, 2, 3].filter(i => !this.winners.includes(i));
-                  this.winners.push(...losers); 
-                  this.endGame();
-                  return;
-              }
-          }
-          
-          // Check Any Team Finished (Both players of a team are in winners list)
-          // Since Double Win checks 1st/2nd, we just need to check if game should end when 3rd winner is determined?
-          // OR if Team A finishes at positions 1 and 3.
-          // OR if Team B finishes at positions 2 and 3? (Impossible if A took 1)
-          
-          // General Rule: If 3 players have finished, game MUST end.
-          // Because if 3 finished, at least one team has 2 members finished.
-          // Is it possible for a team to finish earlier?
-          // We checked 2 players above.
-          // So if 3 players finish, we are done.
-          
-          if (this.winners.length === 3) {
-              // 4th player is the loser
-              const last = [0, 1, 2, 3].find(i => !this.winners.includes(i))!;
-              this.winners.push(last);
-              this.endGame();
-              return;
-          }
-      }
+      if (this.recordFinishIfEmpty(seatIndex)) return true;
       
       this.advanceTurn();
       this.broadcastGameState();
+      return true;
+  }
+
+  /** 手牌被出完或被技能打空时记名次。返回 true 表示这一局已经结束。 */
+  private recordFinishIfEmpty(seat: number): boolean {
+      if (this.hands[seat].length !== 0) return false;
+      if (this.winners.includes(seat)) return false;
+
+      this.winners.push(seat);
+      const position = ['第一名', '第二名', '第三名', '第四名'][this.winners.length - 1];
+      this.addHistoryEntry(
+          HistoryEventType.PlayerFinish,
+          `${this.players[seat].name} 出完所有牌，获得${position}！`,
+          seat,
+          { position: this.winners.length }
+      );
+
+      if (this.winners.length === 2) {
+          const p1 = this.winners[0];
+          const p2 = this.winners[1];
+          if ((p1 % 2) === (p2 % 2)) {
+              const losers = rankUnfinishedPlayers(this.hands.map(h => h.length), this.winners);
+              this.winners.push(...losers);
+              this.endGame();
+              return true;
+          }
+      }
+
+      if (this.winners.length === 3) {
+          const last = [0, 1, 2, 3].find(i => !this.winners.includes(i))!;
+          this.winners.push(last);
+          this.endGame();
+          return true;
+      }
+      return false;
   }
   
   // Helper to end current round and find next start player
@@ -652,12 +691,17 @@ export class Game {
       const order = [winner, (winner + 1) % 4, (winner + 2) % 4, (winner + 3) % 4];
       let found = false;
       for (const seat of order) {
-          if (this.hands[seat].length > 0) {
-              this.currentTurn = seat;
-              found = true;
-              console.log(`[endRound] Next turn goes to seat ${seat}`);
-              break;
+          if (this.hands[seat].length === 0) continue;
+          if (this.skipNextTurn[seat]) {
+              this.skipNextTurn[seat] = false;
+              this.io.to(this.roomId).emit('notice', `${this.players[seat].name} 被【乐不思蜀】跳过了回合！`);
+              console.log(`[endRound] Seat ${seat} skipped by 乐不思蜀, lead passes on`);
+              continue;
           }
+          this.currentTurn = seat;
+          found = true;
+          console.log(`[endRound] Next turn goes to seat ${seat}`);
+          break;
       }
       
       if (!found) {
@@ -717,7 +761,7 @@ export class Game {
           if (isSkipped) {
               console.log(`[advanceTurn] Skipping seat ${next} (乐不思蜀 effect)`);
               this.skipNextTurn[next] = false;
-              this.io.to(this.roomId).emit('error', `${this.players[next].name} 被【乐不思蜀】跳过了回合！`);
+              this.io.to(this.roomId).emit('notice', `${this.players[next].name} 被【乐不思蜀】跳过了回合！`);
               this.roundActions[next] = { type: 'pass' }; // Visually show pass
               
               // After skipping, check round end condition again for the NEXT player
@@ -906,7 +950,7 @@ export class Game {
               this.hands[user] = sortCards(this.hands[user], this.level);
               trackNewCard(user, card1.id);
               trackNewCard(user, card2.id);
-              this.io.to(this.roomId).emit('error', `${playerName} 使用了【无中生有】，获得2张牌！`);
+              this.io.to(this.roomId).emit('notice', `${playerName} 使用了【无中生有】，获得2张牌！`);
               return true;
           }
           
@@ -919,7 +963,8 @@ export class Game {
               this.hands[user].push(stolenCard);
               this.hands[user] = sortCards(this.hands[user], this.level);
               trackNewCard(user, stolenCard.id);
-              this.io.to(this.roomId).emit('error', `${playerName} 对 ${targetName} 使用了【顺手牵羊】！`);
+              this.io.to(this.roomId).emit('notice', `${playerName} 对 ${targetName} 使用了【顺手牵羊】！`);
+              this.recordFinishIfEmpty(target);
               return true;
           }
           
@@ -929,7 +974,8 @@ export class Game {
               const targetHand = this.hands[target];
               const randIdx = Math.floor(Math.random() * targetHand.length);
               targetHand.splice(randIdx, 1);
-              this.io.to(this.roomId).emit('error', `${playerName} 对 ${targetName} 使用了【过河拆桥】！`);
+              this.io.to(this.roomId).emit('notice', `${playerName} 对 ${targetName} 使用了【过河拆桥】！`);
+              this.recordFinishIfEmpty(target);
               return true;
           }
           
@@ -937,7 +983,7 @@ export class Game {
               // 乐不思蜀: Target skips next turn
               if (target === undefined) return false;
               this.skipNextTurn[target] = true;
-              this.io.to(this.roomId).emit('error', `${playerName} 对 ${targetName} 使用了【乐不思蜀】！下回合将被跳过！`);
+              this.io.to(this.roomId).emit('notice', `${playerName} 对 ${targetName} 使用了【乐不思蜀】！下回合将被跳过！`);
               return true;
           }
           
@@ -953,7 +999,7 @@ export class Game {
                   this.hands[seat] = sortCards(this.hands[seat], this.level);
                   trackNewCard(seat, card.id);
               });
-              this.io.to(this.roomId).emit('error', `${playerName} 使用了【五谷丰登】，每人获得1张牌！`);
+              this.io.to(this.roomId).emit('notice', `${playerName} 使用了【五谷丰登】，每人获得1张牌！`);
               return true;
           }
           
@@ -1051,24 +1097,21 @@ export class Game {
     // Don't globally clear newCardIds anymore
     // this.newCardIds = {};
     
-    // Bot Turn Logic
     const currentPlayer = this.players[this.currentTurn];
-    if (currentPlayer && currentPlayer.isBot && this.currentPhase === GamePhase.Playing && this.winners.length < 3) {
-        // Capture the current seat to avoid race conditions
-        const botSeat = this.currentTurn;
-        console.log(`[Bot] Scheduling Bot ${botSeat} to play in 1.5s...`);
-        const timeout = setTimeout(() => {
-            if (!this.isActive) {
-                console.log(`[Bot] Game no longer active, aborting bot turn for seat ${botSeat}`);
-                return;
-            }
-            this.handleBotTurn(botSeat);
-        }, 1500);
-        this.registerTimeout(timeout);
+    if (currentPlayer && this.isAutoPlayer(currentPlayer) && this.currentPhase === GamePhase.Playing && this.winners.length < 3) {
+        this.scheduleAutoTurn(this.currentTurn);
     } else {
-        // Human's turn or game over
         console.log(`[Turn] Now waiting for Player ${this.currentTurn} (Human) to play. Phase: ${this.currentPhase}`);
     }
+  }
+
+  private scheduleAutoTurn(seat: number) {
+      console.log(`[Bot] Scheduling auto turn for seat ${seat}`);
+      const timeout = setTimeout(() => {
+          if (!this.isActive) return;
+          this.handleBotTurn(seat);
+      }, 800);
+      this.registerTimeout(timeout);
   }
   
   // Bot emoji/chat messages
@@ -1109,6 +1152,11 @@ export class Game {
           console.log(`[Bot] Abort: Phase is ${this.currentPhase}, not Playing`);
           return;
       }
+      const actor = this.players[seatIndex];
+      if (!actor || (!actor.isBot && !actor.isDisconnected)) {
+          console.log(`[Bot] Seat ${seatIndex} is a connected human, leaving the turn`);
+          return;
+      }
       if (this.currentTurn !== seatIndex) {
           console.log(`[Bot] Abort: currentTurn is ${this.currentTurn}, not ${seatIndex}`);
           return;
@@ -1123,7 +1171,7 @@ export class Game {
       }
       
       // In Skill mode, bot may use a skill first
-      if (this.gameMode === GameMode.Skill && this.skillCards[seatIndex].length > 0) {
+      if (actor.isBot && this.gameMode === GameMode.Skill && this.skillCards[seatIndex].length > 0) {
           const skillDecision = this.decideBotSkillUse(seatIndex);
           if (skillDecision) {
               console.log(`[Bot] Seat ${seatIndex} decides to use skill: ${skillDecision.skill.type}`);
@@ -1151,20 +1199,27 @@ export class Game {
           const handType = getHandType(move, this.level);
           const isBomb = handType && (handType.type === HandType.Bomb || handType.type === HandType.StraightFlush || handType.type === HandType.FourKings);
           
-          this.handlePlayHand(seatIndex, move);
+          const played = this.handlePlayHand(seatIndex, move);
+          if (!played) {
+              if (this.lastHand && this.lastHand.playerIndex !== seatIndex) {
+                  this.handlePass(seatIndex);
+              }
+              return;
+          }
           
           // Bot sends emoji based on action
-          if (isBomb) {
-              this.botSendChat(seatIndex, 'bomb');
-          } else if (this.hands[seatIndex].length === 0) {
-              // Bot just finished all cards
-              this.botSendChat(seatIndex, 'win');
-          } else {
-              this.botSendChat(seatIndex, 'play');
+          if (actor.isBot) {
+              if (isBomb) {
+                  this.botSendChat(seatIndex, 'bomb');
+              } else if (this.hands[seatIndex].length === 0) {
+                  this.botSendChat(seatIndex, 'win');
+              } else {
+                  this.botSendChat(seatIndex, 'play');
+              }
           }
       } else {
           this.handlePass(seatIndex);
-          this.botSendChat(seatIndex, 'pass');
+          if (actor.isBot) this.botSendChat(seatIndex, 'pass');
       }
   }
   

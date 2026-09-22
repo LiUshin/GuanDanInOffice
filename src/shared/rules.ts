@@ -12,6 +12,15 @@ export function getLogicValue(rank: Rank, level: number): number {
   return rank;
 }
 
+/** 级牌显示：2–10 用数字，11–14 用 J/Q/K/A。 */
+export function formatLevelRank(level: number): string {
+  if (level === Rank.Jack) return 'J';
+  if (level === Rank.Queen) return 'Q';
+  if (level === Rank.King) return 'K';
+  if (level === Rank.Ace) return 'A';
+  return String(level);
+}
+
 export function sortCards(cards: Card[], level: number): Card[] {
   return [...cards].sort((a, b) => {
     const valA = getLogicValue(a.rank, level);
@@ -19,6 +28,27 @@ export function sortCards(cards: Card[], level: number): Card[] {
     if (valA !== valB) return valB - valA; // Descending
     return b.suit - a.suit;
   });
+}
+
+/** 非癞子点数能否被若干张癞子补成顺子。返回最大顶张；A2345 的顶张是 5。 */
+export function bestStraightValue(ranks: number[], wildCount: number): number | null {
+  const set = new Set(ranks);
+  let best: number | null = null;
+  const windows: { ranks: number[]; value: number }[] = [
+    { ranks: [Rank.Ace, Rank.Two, Rank.Three, Rank.Four, Rank.Five], value: 5 },
+  ];
+  for (let start = Rank.Two; start <= Rank.Ten; start++) {
+    const seq = [0, 1, 2, 3, 4].map(i => start + i);
+    windows.push({ ranks: seq, value: seq[4] });
+  }
+  windows.forEach(window => {
+    const missing = window.ranks.filter(rank => !set.has(rank)).length;
+    const outside = [...set].filter(rank => !window.ranks.includes(rank)).length;
+    if (outside === 0 && missing <= wildCount && (best === null || window.value > best)) {
+      best = window.value;
+    }
+  });
+  return best;
 }
 
 // Check if cards are consecutive
@@ -120,40 +150,17 @@ export function getHandType(cards: Card[], level: number): Hand | null {
       }
   }
   
-  // 6. Straight (5 cards)
-  if (len === 5) {
-      const ranks = nonWilds.map(c => c.rank === level ? level : c.rank).filter(r => r <= Rank.Ace); 
-      if (!nonWilds.some(c => c.rank > Rank.Ace)) {
-          const uniqueRanks = new Set(ranks);
-          if (uniqueRanks.size === ranks.length) { 
-               if (ranks.length === 0) {
-                   return { type: HandType.Straight, cards, value: 14 }; 
-               }
-               
-               const ranksLowA = ranks.map(r => r === 14 ? 1 : r);
-               let val = -1;
-               const maxR = Math.max(...ranks);
-               const minR = Math.min(...ranks);
-               if (maxR - minR <= 4) {
-                    const top = minR + 4; 
-                    if (top <= 14) val = top;
-               }
-               
-               if (ranks.includes(14)) {
-                    const minL = Math.min(...ranksLowA);
-                    const maxL = Math.max(...ranksLowA);
-                    if (maxL - minL <= 4) {
-                        if (val === -1 || 5 > val) val = 5; 
-                    }
-               }
-
-               if (val !== -1) {
-                   const suits = nonWilds.map(c => c.suit);
-                   if (new Set(suits).size <= 1) {
-                       return { type: HandType.StraightFlush, cards, value: val, bombCount: 5 }; 
-                   }
-                   return { type: HandType.Straight, cards, value: val };
-               }
+  // 6. Straight (5 cards). 癞子补在 A 下面（例如 JQKA + 癞子 = 10JQKA）也算。
+  if (len === 5 && !nonWilds.some(c => c.rank > Rank.Ace)) {
+      const ranks = nonWilds.map(c => c.rank).filter(r => r <= Rank.Ace);
+      if (new Set(ranks).size === ranks.length) {
+          const value = bestStraightValue(ranks, wildCount);
+          if (value !== null) {
+              const sameSuit = nonWilds.length === 0 || new Set(nonWilds.map(c => c.suit)).size === 1;
+              if (sameSuit) {
+                  return { type: HandType.StraightFlush, cards, value, bombCount: 5 };
+              }
+              return { type: HandType.Straight, cards, value };
           }
       }
   }
@@ -205,15 +212,17 @@ export function compareHands(handA: Hand, handB: Hand): number {
     if (isBombA && !isBombB) return 1;
     if (!isBombA && isBombB) return -1;
     
-    // Both Bombs (or SF)
+    // Both Bombs (or SF). 四大天王已在上面处理。
+    // 同花顺大于任意张数的普通炸弹；同花顺之间、炸弹之间再比点数。
     if (isBombA && isBombB) {
-        const getScore = (h: Hand) => {
-            if (h.type === HandType.StraightFlush) return 5.5; // SF beats 5-Bomb, loses to 6-Bomb
-            return h.bombCount!;
-        };
-        const sA = getScore(handA);
-        const sB = getScore(handB);
-        if (sA !== sB) return sA - sB;
+        const aIsSF = handA.type === HandType.StraightFlush;
+        const bIsSF = handB.type === HandType.StraightFlush;
+        if (aIsSF && bIsSF) return handA.value - handB.value;
+        if (aIsSF) return 1;
+        if (bIsSF) return -1;
+        const countA = handA.bombCount ?? 0;
+        const countB = handB.bombCount ?? 0;
+        if (countA !== countB) return countA - countB;
         return handA.value - handB.value;
     }
     
@@ -239,8 +248,8 @@ export function getHandDescription(hand: Hand, level: number): string {
         [HandType.Trips]: '三张',
         [HandType.TripsWithPair]: '三带二',
         [HandType.Straight]: '顺子',
-        [HandType.Tube]: '钢板',
-        [HandType.Plate]: '木板',
+        [HandType.Tube]: '三连对',
+        [HandType.Plate]: '钢板',
         [HandType.Bomb]: '炸弹',
         [HandType.StraightFlush]: '同花顺',
         [HandType.FourKings]: '天王炸'

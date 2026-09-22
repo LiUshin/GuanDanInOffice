@@ -23,6 +23,9 @@ export class Match {
     
     // Store last game's winners for tribute phase
     private lastWinners: number[] = [];
+    onMatchEnd?: () => void;
+    private nextGameTimer: NodeJS.Timeout | null = null;
+    private aborted = false;
     
     constructor(io: Server, roomId: string, players: Player[], gameMode: GameMode) {
         this.io = io;
@@ -47,8 +50,8 @@ export class Match {
      * Start a new game within the match
      */
     startNextGame() {
-        if (this.matchWinner !== null) {
-            console.log(`[Match ${this.roomId}] Match already won by Team ${this.matchWinner}`);
+        if (this.aborted || this.matchWinner !== null) {
+            console.log(`[Match ${this.roomId}] Not starting next game. aborted=${this.aborted}, winner=${this.matchWinner}`);
             return;
         }
         
@@ -136,9 +139,12 @@ export class Match {
         this.lastWinners = winners;
         
         // Auto-start next game after a short delay
-        setTimeout(() => {
+        if (this.nextGameTimer) clearTimeout(this.nextGameTimer);
+        this.nextGameTimer = setTimeout(() => {
+            this.nextGameTimer = null;
+            if (this.aborted) return;
             this.startNextGame();
-        }, 3000); // 3 second delay before next game
+        }, 3000);
     }
     
     /**
@@ -177,6 +183,7 @@ export class Match {
             winners: teamPlayers.map(p => ({ name: p.name, seatIndex: p.seatIndex })),
             finalLevels: this.teamLevels
         });
+        this.onMatchEnd?.();
     }
     
     /**
@@ -197,7 +204,15 @@ export class Match {
      */
     forceEndMatch() {
         console.log(`[Match ${this.roomId}] Force ending match`);
-        this.currentGame = null;
+        this.aborted = true;
+        if (this.nextGameTimer) {
+            clearTimeout(this.nextGameTimer);
+            this.nextGameTimer = null;
+        }
+        if (this.currentGame) {
+            this.currentGame.destroy();
+            this.currentGame = null;
+        }
         this.matchWinner = null;
         this.consecutiveWins = { 0: 0, 1: 0 };
     }

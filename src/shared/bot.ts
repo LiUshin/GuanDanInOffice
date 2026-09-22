@@ -154,7 +154,10 @@ export class Bot {
               const window = suitCards.slice(i, i+5);
               const ranks = window.map(c => c.rank);
               if (isConsecutive(ranks)) {
-                  sfs.push({ cards: window, value: ranks[4] }); // Top value
+                  // A2345 是最小同花顺，顶张按 5 计，和 getHandType 一致
+                  const isA2345 = ranks[0] === Rank.Two && ranks[1] === Rank.Three
+                      && ranks[2] === Rank.Four && ranks[3] === Rank.Five && ranks[4] === Rank.Ace;
+                  sfs.push({ cards: window, value: isA2345 ? 5 : ranks[4] });
               }
           }
       }
@@ -190,31 +193,18 @@ export class Bot {
       if (targetIsKings) return null; // Can't beat 4 Kings
       
       if (targetIsSF) {
-          // Can beat with bigger SF or 4 Kings
+          // 同花顺只被更大的同花顺或四大天王压过，普通炸弹压不过
           const targetVal = target.value;
           const biggerSF = sfs.find(sf => sf.value > targetVal);
           if (biggerSF) return biggerSF.cards;
           if (kings) return kings;
-          // Also 6+ bomb beats SF? Rules vary. 
-          // Standard: 4 Kings > 6+ Bomb > SF > 5 Bomb > 4 Bomb.
-          // Wait: SF is usually just below 4 Kings or below 6 Bomb?
-          // Rules: 4 Kings > 6+ > SF > 5 > 4.
-          // Or 4 Kings > SF > 6+ ?
-          // Default: 4 Kings > 6+ > SF > 5 > 4.
-          // Let's assume SF beats 5 Bomb.
-          // Find Bomb >= 6
-          const bigBomb = bombs.find(b => b.cards.length >= 6);
-          if (bigBomb) return bigBomb.cards;
           return null;
       }
       
       if (targetIsBomb) {
-          // Compare with target bomb
-          // Target count
           const tCount = target.bombCount || 4;
           const tVal = target.value;
           
-          // Find bomb with > count OR (== count and > value)
           for (const b of bombs) {
               const bCount = b.cards.length;
               const bVal = b.value;
@@ -222,11 +212,8 @@ export class Bot {
               if (bCount === tCount && bVal > tVal) return b.cards;
           }
           
-          // If 5 bomb or less, SF beats it
-          if (tCount <= 5) {
-              if (sfs.length > 0) return sfs[0].cards;
-          }
-          
+          // 任意同花顺大于普通炸弹
+          if (sfs.length > 0) return sfs[0].cards;
           if (kings) return kings;
       }
       
