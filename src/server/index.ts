@@ -29,8 +29,13 @@ app.use(express.static(path.join(__dirname, '../client'), {
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  socket.on('joinRoom', ({ playerName, roomId }) => {
-    roomManager.joinRoom(socket, playerName, roomId || 'default');
+  socket.on('joinRoom', (data: unknown) => {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      socket.emit('error', '请输入昵称和房间号');
+      return;
+    }
+    const { playerName, roomId } = data as { playerName?: unknown; roomId?: unknown };
+    roomManager.joinRoom(socket, playerName, roomId);
   });
 
   socket.on('getRoomList', () => {

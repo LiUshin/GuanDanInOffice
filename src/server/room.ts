@@ -21,7 +21,30 @@ export class RoomManager {
     this.io = io;
   }
 
-  joinRoom(socket: Socket, playerName: string, roomId: string) {
+  joinRoom(socket: Socket, rawPlayerName: unknown, rawRoomId: unknown) {
+    const playerName = typeof rawPlayerName === 'string' ? rawPlayerName.trim() : '';
+    if (!playerName || playerName.length > 10) {
+      socket.emit('error', '昵称须为 1–10 个字符');
+      return;
+    }
+    if (rawRoomId != null && typeof rawRoomId !== 'string') {
+      socket.emit('error', '房间号格式不正确');
+      return;
+    }
+    const roomId = (typeof rawRoomId === 'string' ? rawRoomId.trim() : '') || 'default';
+    if (roomId.length > 40) {
+      socket.emit('error', '房间号不能超过 40 个字符');
+      return;
+    }
+    // A rejected destination must not evict the player from their current room.
+    const destination = this.rooms.get(roomId);
+    if (destination && !destination.hasSocket(socket)) {
+      const error = destination.getJoinError(playerName);
+      if (error) {
+        socket.emit('error', error);
+        return;
+      }
+    }
     for (const [id, existing] of this.rooms) {
       if (!existing.hasSocket(socket)) continue;
       if (id === roomId) {
@@ -87,6 +110,12 @@ class Room {
     return this.players.some(player => player && player.socket === socket);
   }
 
+  getJoinError(name: string): string | null {
+    const existing = this.players.find(player => player && player.name === name);
+    if (existing) return existing.isDisconnected ? null : '这个名字已经在房间里';
+    return this.players.every(player => player !== null) ? '房间已满' : null;
+  }
+
   addPlayer(socket: Socket, name: string) {
     const existingPlayerIndex = this.players.findIndex(player => player && player.name === name);
     if (existingPlayerIndex !== -1) {
@@ -103,7 +132,6 @@ class Room {
       this.broadcastState();
       if (this.match && this.match.currentGame) {
         const game = this.match.currentGame;
-        game.players[player.seatIndex] = player;
         game.rebindPlayer(player);
         game.sendStateTo(player);
       }
@@ -179,6 +207,10 @@ class Room {
       socket.emit('error', '对局进行中无法切换模式');
       return;
     }
+    if (mode !== GameMode.Normal && mode !== GameMode.Skill) {
+      socket.emit('error', '请选择普通或技能模式');
+      return;
+    }
     this.gameMode = mode;
     this.io.to(this.id).emit('notice', `游戏模式已切换为: ${mode === GameMode.Skill ? '技能模式' : '普通模式'}`);
     this.broadcastState();
@@ -187,9 +219,13 @@ class Room {
   handleChat(socket: Socket, msg: string) {
     const player = this.players.find(seated => seated && seated.socket === socket);
     if (!player) return;
+    if (typeof msg !== 'string' || !msg.trim() || msg.trim().length > 200) {
+      socket.emit('error', '聊天消息须为 1–200 个字符');
+      return;
+    }
     this.io.to(this.id).emit('chatMessage', {
       sender: player.name,
-      text: msg,
+      text: msg.trim(),
       time: new Date().toLocaleTimeString(),
       seatIndex: player.seatIndex
     });
@@ -197,7 +233,7 @@ class Room {
 
   switchSeat(socket: Socket, targetSeat: number) {
     if (this.match && this.match.matchWinner === null) return;
-    if (targetSeat < 0 || targetSeat > 3) return;
+    if (!Number.isInteger(targetSeat) || targetSeat < 0 || targetSeat > 3) return;
 
     const currentIdx = this.players.findIndex(player => player && player.socket === socket);
     if (currentIdx === -1 || this.players[targetSeat] !== null) return;
@@ -249,6 +285,7 @@ class Room {
     const player = this.players[index]!;
     const playerName = player.name;
     this.unbind(socket);
+    this.match?.currentGame?.detachPlayer(index, socket);
     player.socket = undefined;
     player.isReady = false;
     socket.leave(this.id);
@@ -308,7 +345,11 @@ class Room {
     this.broadcastState();
 
     this.match = new Match(this.io, this.id, gamePlayers, this.gameMode);
-    this.match.onMatchEnd = () => this.releaseBots();
+    this.match.onMatchEnd = () => {
+      this.match?.currentGame?.destroy();
+      this.match = null;
+      this.releaseBots();
+    };
     this.match.startMatch();
     this.io.to(this.id).emit('matchStarted');
   }
