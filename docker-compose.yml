@@ -10,6 +10,9 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
+      - GUANDAN_DATA_DIR=/app/data
+    volumes:
+      - guandan-data:/app/data
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
       interval: 30s
@@ -21,3 +24,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  guandan-data:

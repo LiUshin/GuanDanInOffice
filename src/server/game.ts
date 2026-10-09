@@ -28,7 +28,7 @@ export function rankUnfinishedPlayers(handSizes: number[], finished: number[]): 
   });
 }
 
-enum GamePhase {
+export enum GamePhase {
   Waiting = 'Waiting',
   Dealing = 'Dealing',
   Tribute = 'Tribute',
@@ -54,6 +54,9 @@ export class Game {
   // Callback for when game ends (used by Match)
   onGameEnd?: (winners: number[]) => void;
   
+  onStateChange?: () => void;
+  private recoveryPaused = false;
+
   // Lifecycle management
   private isActive: boolean = true;
   private pendingTimeouts: NodeJS.Timeout[] = [];
@@ -102,6 +105,35 @@ export class Game {
     });
   }
   
+  /** Explicit data-only allowlist: never serialize sockets, callbacks or timers. */
+  snapshot() {
+      return {
+          level: this.level, currentPhase: this.currentPhase, hands: this.hands,
+          currentTurn: this.currentTurn, lastHand: this.lastHand, passCount: this.passCount,
+          roundActions: this.roundActions, winners: this.winners, tributeState: this.tributeState,
+          teamLevels: this.teamLevels, activeTeam: this.activeTeam, prevWinners: this.prevWinners,
+          gameMode: this.gameMode, skillCards: this.skillCards, skipNextTurn: this.skipNextTurn,
+          newCardIds: this.newCardIds, history: this.history, historyIdCounter: this.historyIdCounter,
+          currentRound: this.currentRound
+      };
+  }
+
+  restore(state: ReturnType<Game['snapshot']>) {
+      // The caller validates the versioned snapshot before creating any live instances.
+      for (const key of Object.keys(this.snapshot())) (this as any)[key] = state[key];
+      this.recoveryPaused = true;
+  }
+
+  resumeAfterRestart() {
+      if (!this.isActive || !this.recoveryPaused) return;
+      this.recoveryPaused = false;
+      if (this.currentPhase === GamePhase.Tribute) this.processAutoTribute();
+      else if (this.currentPhase === GamePhase.ReturnTribute) {
+          this.autoReturnForBots();
+          this.checkReturnDone();
+      } else this.broadcastGameState();
+  }
+
   rebindPlayer(p: Player) {
       const previous = this.players[p.seatIndex];
       if (previous?.socket) this.unbindPlayerListeners(previous.socket);
@@ -520,7 +552,7 @@ export class Game {
   }
 
   private isAutoPlayer(player?: Player): boolean {
-      return !!player && (!!player.isBot || !!player.isDisconnected);
+      return !this.recoveryPaused && !!player && (!!player.isBot || !!player.isDisconnected);
   }
 
   /** 玩家掉线后，出牌、进贡、还贡改由系统代打，直到他重连。 */
@@ -1106,16 +1138,12 @@ export class Game {
           { winners: this.winners, resultType }
       );
       
-      // Broadcast final game state FIRST so clients see the last hand
+      // Apply match progression before checkpointing Score. Restoring this checkpoint
+      // must never apply the level increase twice or lose the next-round transition.
+      this.onGameEnd?.(this.winners);
+      if (!this.isActive) return; // Match completion already sent matchOver.
       this.broadcastGameState();
-      
-      // Then send gameOver event
       this.io.to(this.roomId).emit('gameOver', { winners: this.winners });
-      
-      // Call onGameEnd callback if set (used by Match)
-      if (this.onGameEnd) {
-          this.onGameEnd(this.winners);
-      }
   }
 
   emitError(seatIndex: number, msg: string) {
@@ -1126,6 +1154,7 @@ export class Game {
   }
 
   broadcastGameState() {
+    this.onStateChange?.();
     this.players.forEach((p, idx) => {
         if (!p.isBot && p.socket) {
             const myNewCardIds = this.newCardIds[idx] || [];
@@ -1155,6 +1184,7 @@ export class Game {
   }
 
   private scheduleAutoTurn(seat: number) {
+      if (this.recoveryPaused) return;
       console.log(`[Bot] Scheduling auto turn for seat ${seat}`);
       const timeout = setTimeout(() => {
           if (!this.isActive) return;
@@ -1190,7 +1220,7 @@ export class Game {
 
   handleBotTurn(seatIndex: number) {
       // Check if game is still active
-      if (!this.isActive) {
+      if (!this.isActive || this.recoveryPaused) {
           console.log(`[Bot] Game is no longer active, aborting bot turn`);
           return;
       }

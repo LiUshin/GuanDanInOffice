@@ -1,6 +1,8 @@
 import { Server, Socket } from 'socket.io';
 import { Match } from './match';
 import { GameMode } from '../shared/types';
+import { SnapshotStore } from './persistence';
+import { validateSnapshot } from './snapshotValidation';
 
 export interface Player {
   id: string;
@@ -13,12 +15,73 @@ export interface Player {
   isHost?: boolean;
 }
 
+export interface ServerSnapshot {
+  version: 1;
+  rooms: {
+    id: string;
+    gameMode: GameMode;
+    players: (Omit<Player, 'socket'> | null)[];
+    match: ReturnType<Match['snapshot']> | null;
+  }[];
+}
+
 export class RoomManager {
   private io: Server;
   private rooms: Map<string, Room> = new Map();
 
-  constructor(io: Server) {
+  constructor(io: Server, private store?: SnapshotStore<ServerSnapshot>) {
     this.io = io;
+    const snapshot = store?.load();
+    if (snapshot != null) {
+      validateSnapshot(snapshot);
+      for (const saved of snapshot.rooms) {
+        const room = this.createRoom(saved.id);
+        room.gameMode = saved.gameMode;
+        room.players = saved.players.map(player => player ? {
+          id: player.id, name: player.name, seatIndex: player.seatIndex,
+          isReady: false, isBot: !!player.isBot, isHost: !!player.isHost,
+          isDisconnected: !player.isBot
+        } : null);
+        if (saved.match) {
+          room.match = new Match(io, room.id, room.players as Player[], room.gameMode);
+          room.bindMatch();
+          room.match.restore(saved.match);
+        }
+      }
+    }
+    // Verify the volume is writable before accepting users, even on an empty server.
+    this.persist();
+  }
+
+  private createRoom(id: string) {
+    const room = new Room(id, this.io);
+    room.onChange = () => this.persist();
+    room.onEmpty = () => { this.rooms.delete(id); this.persist(); };
+    this.rooms.set(id, room);
+    return room;
+  }
+
+  snapshot(): ServerSnapshot {
+    return { version: 1, rooms: [...this.rooms.values()].filter(room => !room.isEmpty()).map(room => ({
+      id: room.id, gameMode: room.gameMode,
+      players: room.players.map(player => player ? {
+        id: player.id, name: player.name, seatIndex: player.seatIndex,
+        isReady: player.isReady, isBot: !!player.isBot,
+        isDisconnected: !!player.isDisconnected, isHost: !!player.isHost
+      } : null),
+      match: room.match?.snapshot() ?? null
+    })) };
+  }
+
+  private persist() {
+    // Fail closed: do not keep accepting play after durable writes stop working.
+    // Uncaught storage errors stop the server; the previous atomic snapshot remains.
+    this.store?.save(this.snapshot());
+  }
+
+  shutdown() {
+    this.persist();
+    for (const room of this.rooms.values()) room.match?.forceEndMatch();
   }
 
   joinRoom(socket: Socket, rawPlayerName: unknown, rawRoomId: unknown) {
@@ -56,9 +119,7 @@ export class RoomManager {
 
     let room = this.rooms.get(roomId);
     if (!room) {
-      room = new Room(roomId, this.io);
-      room.onEmpty = () => this.rooms.delete(roomId);
-      this.rooms.set(roomId, room);
+      room = this.createRoom(roomId);
     }
     room.addPlayer(socket, playerName);
     if (room.isEmpty()) this.rooms.delete(roomId);
@@ -96,6 +157,7 @@ class Room {
   match: Match | null = null;
   gameMode: GameMode = GameMode.Normal;
   onEmpty?: () => void;
+  onChange?: () => void;
 
   constructor(id: string, io: Server) {
     this.id = id;
@@ -130,12 +192,16 @@ class Room {
       socket.join(this.id);
       this.bindSocketListeners(socket);
       this.broadcastState();
+      let recovering = false;
       if (this.match && this.match.currentGame) {
         const game = this.match.currentGame;
         game.rebindPlayer(player);
         game.sendStateTo(player);
+        recovering = this.match.resumeAfterRestart();
       }
-      this.io.to(this.id).emit('notice', `${name} 重新连接`);
+      this.io.to(this.id).emit('notice', recovering
+        ? '已恢复重启前的牌局；真人现在可操作，15 秒后机器人及未重连玩家恢复托管'
+        : `${name} 重新连接`);
       return;
     }
 
@@ -289,7 +355,6 @@ class Room {
     player.socket = undefined;
     player.isReady = false;
     socket.leave(this.id);
-    if (explicit) socket.emit('leftRoom');
 
     if (this.inLiveMatch()) {
       player.isDisconnected = true;
@@ -305,6 +370,8 @@ class Room {
     }
     this.broadcastState();
     if (this.isEmpty()) this.onEmpty?.();
+    // Acknowledge only after the departure is durably recorded.
+    if (explicit) socket.emit('leftRoom');
   }
 
   toggleReady(seatIndex: number) {
@@ -342,16 +409,21 @@ class Room {
     });
 
     this.players = gamePlayers;
-    this.broadcastState();
 
     this.match = new Match(this.io, this.id, gamePlayers, this.gameMode);
-    this.match.onMatchEnd = () => {
-      this.match?.currentGame?.destroy();
+    this.bindMatch();
+    this.match.startMatch();
+    this.broadcastState();
+    this.io.to(this.id).emit('matchStarted');
+  }
+
+  bindMatch() {
+    this.match!.onStateChange = () => this.onChange?.();
+    this.match!.onMatchEnd = () => {
+      this.match?.destroy();
       this.match = null;
       this.releaseBots();
     };
-    this.match.startMatch();
-    this.io.to(this.id).emit('matchStarted');
   }
 
   /** 整场结束后清掉 Bot 和没回来的人，房主仍是原来的玩家。 */
@@ -369,6 +441,7 @@ class Room {
   }
 
   broadcastState() {
+    this.onChange?.();
     const playerList = this.players.map(player => player ? {
       id: player.id,
       name: player.name,

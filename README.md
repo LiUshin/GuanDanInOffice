@@ -189,9 +189,13 @@ npm ci
 npm run check
 ```
 
-`check` 包含 TypeScript 检查、客户端会话 / 选牌回归、服务器房间生命周期测试、普通 / 技能机器人模拟，以及生产构建。也可以分别运行 `npm run typecheck`、`npm test` 和 `npm run build`。
+`check` 包含 TypeScript 检查、客户端会话 / 选牌回归、服务器房间生命周期测试、普通 / 技能机器人模拟，生产构建，以及真实进程重启恢复测试。也可以分别运行 `npm run typecheck`、`npm test` 和 `npm run build`。
 
 改动交互后建议手动检查：创建与加入房间、准备 / 换座、普通与技能开局、刷新与断线恢复、离开后加入另一桌、历史弹窗 Escape、摸鱼模式，以及手机纵向 / 横向下的手牌滚动。
+
+## 💾 服务重启恢复
+
+服务自动保存正在进行的牌局。重启后使用原昵称进入原房间，恢复手牌、回合、技能、进贡和整场进度。无人回来时暂停，第一位玩家回来后留 15 秒重连缓冲再继续托管。部署时务必保留 `GUANDAN_DATA_DIR` 对应目录；Docker Compose 已配置持久卷。详见 [部署与存档说明](DEPLOYMENT.md#牌局持久化与重启恢复)。
 
 ## 🤝 贡献 (Contributing)
 欢迎提交 Issue 和 Pull Request！

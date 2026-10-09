@@ -1,5 +1,5 @@
 import { Server } from 'socket.io';
-import { Game } from './game';
+import { Game, GamePhase } from './game';
 import { Player } from './room';
 import { GameMode } from '../shared/types';
 
@@ -25,6 +25,9 @@ export class Match {
     private lastWinners: number[] = [];
     private roundNumber = 0;
     onMatchEnd?: () => void;
+    onStateChange?: () => void;
+    private recoveryTimer: NodeJS.Timeout | null = null;
+    private recovered = false;
     private nextGameTimer: NodeJS.Timeout | null = null;
     private aborted = false;
     
@@ -35,6 +38,46 @@ export class Match {
         this.gameMode = gameMode;
     }
     
+    snapshot() {
+        return {
+            teamLevels: this.teamLevels, activeTeam: this.activeTeam,
+            consecutiveWins: this.consecutiveWins, lastWinners: this.lastWinners,
+            roundNumber: this.roundNumber, currentGame: this.currentGame?.snapshot() ?? null
+        };
+    }
+
+    restore(state: ReturnType<Match['snapshot']>) {
+        this.teamLevels = state.teamLevels;
+        this.activeTeam = state.activeTeam;
+        this.consecutiveWins = state.consecutiveWins;
+        this.lastWinners = state.lastWinners;
+        this.roundNumber = state.roundNumber;
+        this.currentGame = new Game(this.io, this.roomId, this.players.map(p => ({ ...p })), this.gameMode);
+        this.currentGame.restore(state.currentGame!);
+        this.bindGame();
+        this.recovered = true;
+    }
+
+    /** Keep recovered games frozen until someone returns, then allow reconnect grace. */
+    resumeAfterRestart(delayMs = 15000) {
+        if (!this.recovered || this.recoveryTimer) return false;
+        this.recoveryTimer = setTimeout(() => {
+            this.recoveryTimer = null;
+            if (this.aborted) return;
+            if (!this.players.some(player => !player.isBot && !player.isDisconnected && player.socket)) return;
+            this.recovered = false;
+            this.io.to(this.roomId).emit('notice', '重启恢复缓冲已结束，未重连的玩家由系统托管');
+            if (this.currentGame?.currentPhase === GamePhase.Score) this.startNextGame();
+            else this.currentGame?.resumeAfterRestart();
+        }, delayMs);
+        return true;
+    }
+
+    private bindGame() {
+        this.currentGame!.onGameEnd = winners => this.handleGameEnd(winners);
+        this.currentGame!.onStateChange = () => this.onStateChange?.();
+    }
+
     /**
      * Start the first game in the match
      */
@@ -52,6 +95,11 @@ export class Match {
      * Start a new game within the match
      */
     startNextGame() {
+        if (this.nextGameTimer) clearTimeout(this.nextGameTimer);
+        this.nextGameTimer = null;
+        if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+        this.recoveryTimer = null;
+        this.recovered = false;
         if (this.aborted || this.matchWinner !== null) {
             console.log(`[Match ${this.roomId}] Not starting next game. aborted=${this.aborted}, winner=${this.matchWinner}`);
             return;
@@ -79,7 +127,7 @@ export class Match {
         this.currentGame.prevWinners = prevWinners;
         
         // Listen for game end
-        this.currentGame.onGameEnd = (winners: number[]) => this.handleGameEnd(winners);
+        this.bindGame();
         
         this.currentGame.start();
     }
@@ -142,6 +190,10 @@ export class Match {
         // Store winners in Match for next game's tribute phase
         this.lastWinners = winners;
         
+        // Keep the restart grace even if a returning human finishes this round.
+        // Its recovery timer will advance Score once the full grace has elapsed.
+        if (this.recovered) return;
+
         // Auto-start next game after a short delay
         if (this.nextGameTimer) clearTimeout(this.nextGameTimer);
         this.nextGameTimer = setTimeout(() => {
@@ -182,12 +234,13 @@ export class Match {
      */
     broadcastMatchEnd(winningTeam: number) {
         const teamPlayers = this.players.filter(p => p.seatIndex % 2 === winningTeam);
+        // Remove the completed match from durable room state before announcing it.
+        this.onMatchEnd?.();
         this.io.to(this.roomId).emit('matchOver', {
             winningTeam,
             winners: teamPlayers.map(p => ({ name: p.name, seatIndex: p.seatIndex })),
             finalLevels: this.teamLevels
         });
-        this.onMatchEnd?.();
     }
     
     /**
@@ -206,17 +259,21 @@ export class Match {
     /**
      * Force end the current match
      */
-    forceEndMatch() {
-        console.log(`[Match ${this.roomId}] Force ending match`);
+    destroy() {
         this.aborted = true;
+        if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+        this.recoveryTimer = null;
         if (this.nextGameTimer) {
             clearTimeout(this.nextGameTimer);
             this.nextGameTimer = null;
         }
-        if (this.currentGame) {
-            this.currentGame.destroy();
-            this.currentGame = null;
-        }
+        this.currentGame?.destroy();
+    }
+
+    forceEndMatch() {
+        console.log(`[Match ${this.roomId}] Force ending match`);
+        this.destroy();
+        this.currentGame = null;
         this.matchWinner = null;
         this.consecutiveWins = { 0: 0, 1: 0 };
     }

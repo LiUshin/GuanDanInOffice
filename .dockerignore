@@ -1,4 +1,4 @@
-﻿node_modules
+node_modules
 npm-debug.log
 .git
 .gitignore
@@ -8,3 +8,5 @@ npm-debug.log
 .cursor
 terminals
 dist
+
+data
