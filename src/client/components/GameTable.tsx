@@ -1,17 +1,26 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useId } from 'react';
 import { Card as CardType, Rank, Suit, GameMode, SkillCard, SkillCardType, Hand, HandType } from '../../shared/types';
 import { Bot } from '../../shared/bot';
 import { Card } from './Card';
 import { GameState, RoomState } from '../useGame';
-import { getAllPossibleHandTypes, getHandDescription, sortCards, formatLevelRank, getLogicValue } from '../../shared/rules';
+import { getAllPossibleHandTypes, getHandDescription, sortCards, formatLevelRank } from '../../shared/rules';
 import { arrangeHand, CardGroup } from '../../shared/arrange';
 import { SkillCardButton } from './SkillCardButton';
 import { TargetSelectModal } from './TargetSelectModal';
 import { GameHistory } from './GameHistory';
+import { GameDialog } from './gameDialog';
+import { evaluateSelection, getTributeEligibleIds } from './gameSelection';
+import './gameTable.css';
 
 const EMPTY_HAND: CardType[] = [];
+const CHAT_MAX_LENGTH = 200;
+const QUICK_EMOJIS = ['😀', '😂', '😎', '🥳', '😭', '🤔', '👍', '🔥', '🎉', '🤝', '💪', '🙏'];
+const SUIT_ORDER = [Suit.Joker, Suit.Spades, Suit.Hearts, Suit.Clubs, Suit.Diamonds];
+const WINNER_LABELS = ['头游', '二游', '三游', '末游'];
+type Player = NonNullable<RoomState['players'][number]>;
 
 interface Props {
+  interactionDisabled?: boolean;
   gameState: GameState | null;
   roomState: RoomState;
   mySeat: number;
@@ -21,7 +30,7 @@ interface Props {
   onStart: () => void;
   onTribute?: (cards: CardType[]) => void;
   onReturnTribute?: (cards: CardType[]) => void;
-  chatMessages: {sender: string, text: string, time: string, seatIndex: number}[];
+  chatMessages: { sender: string; text: string; time: string; seatIndex: number }[];
   onSendChat: (msg: string) => void;
   onSwitchSeat: (seatIdx: number) => void;
   onSetGameMode?: (mode: GameMode) => void;
@@ -30,843 +39,253 @@ interface Props {
   onLeave?: () => void;
 }
 
-export const GameTable: React.FC<Props> = ({ 
-  gameState, roomState, mySeat, onPlay, onPass, onReady, onStart,
-  onTribute, onReturnTribute, chatMessages, onSendChat, onSwitchSeat,
-  onSetGameMode, onUseSkill, onForceEndGame, onLeave
-}) => {
+function countHand(gameState: GameState | null, seat: number) {
+  const hand = gameState?.hands[seat];
+  return Array.isArray(hand) ? hand.length : typeof hand === 'number' ? hand : 0;
+}
+
+function PlayerSeat({ player, seat, mySeat, position, gameState, bubble }: {
+  player?: Player; seat: number; mySeat: number; position: string; gameState: GameState; bubble?: string;
+}) {
+  const isTeammate = seat % 2 === mySeat % 2;
+  const count = countHand(gameState, seat);
+  const action = gameState.roundActions?.[seat];
+  const winner = gameState.winners.indexOf(seat);
+  const active = gameState.phase === 'Playing' && gameState.currentTurn === seat;
+  return (
+    <section className={`game-seat game-seat--${position}${isTeammate ? ' is-teammate' : ''}${active ? ' is-active' : ''}`} aria-label={`${player?.name || '玩家'}，${isTeammate ? '队友' : '对手'}，剩余 ${count} 张`}>
+      <div className="game-seat__identity">
+        <span className="game-seat__avatar" aria-hidden="true">{player?.name?.slice(0, 1).toUpperCase() || '?'}</span>
+        <div className="game-seat__details"><strong title={player?.name}>{player?.name || '等待中'}</strong><span>{isTeammate ? '队友' : '对手'}{player?.isHost ? ' · 房主' : ''}{player?.isBot ? ' · AI' : ''}</span></div>
+      </div>
+      <div className="game-seat__count"><strong className={count <= 5 ? 'is-low' : ''}>{count}</strong><span>张牌</span>{winner >= 0 && <span className="game-badge game-badge--violet">{WINNER_LABELS[winner]}</span>}</div>
+      <div className="game-seat__activity">{player?.isDisconnected ? '离线 · 托管中' : active ? '思考中…' : action?.type === 'pass' ? '已过牌' : action?.hand ? getHandDescription(action.hand, gameState.level) : winner >= 0 ? '已出完' : '等待出牌'}</div>
+      {bubble && <div className="game-seat__bubble" title={bubble}>{bubble}</div>}
+    </section>
+  );
+}
+
+export const GameTable: React.FC<Props> = ({ interactionDisabled = false, gameState, roomState, mySeat, onPlay, onPass, onTribute, onReturnTribute, chatMessages, onSendChat, onUseSkill, onForceEndGame, onLeave }) => {
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
+  const [viewMode, setViewMode] = useState<'arranged' | 'rank' | 'stacked'>('arranged');
+  const [feedback, setFeedback] = useState('');
   const [chatInput, setChatInput] = useState('');
-  const [viewMode, setViewMode] = useState<'arranged' | 'rank' | 'stacked'>('arranged'); 
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const [chatError, setChatError] = useState('');
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-  
-  // Common emojis for quick selection
-  const quickEmojis = ['😀', '😂', '🤣', '😎', '🥳', '😭', '😡', '🤔', '👍', '👎', '❤️', '🔥', '💯', '🎉', '🤝', '✌️', '💪', '🙏', '😱', '🤯'];
-  
-  // Skill card state
-  const [pendingSkill, setPendingSkill] = useState<SkillCard | null>(null);
-  const [showTargetSelect, setShowTargetSelect] = useState(false);
-  
-  // New card highlight state
-  const [highlightedCardIds, setHighlightedCardIds] = useState<Set<string>>(new Set());
-  
-  // Chat bubble state for each seat (seat -> message)
-  const [chatBubbles, setChatBubbles] = useState<{ [seat: number]: string }>({});
-  
-  // History window state
-  const [showHistory, setShowHistory] = useState(false);
   const [showChat, setShowChat] = useState(false);
-  const bubbleTimers = useRef<{ [seat: number]: number }>({});
-  
-  // Hand type selection state (for wild cards with multiple interpretations)
+  const [showHistory, setShowHistory] = useState(false);
+  const [pendingSkill, setPendingSkill] = useState<SkillCard | null>(null);
   const [possibleHands, setPossibleHands] = useState<Hand[]>([]);
-  const [showHandSelector, setShowHandSelector] = useState(false);
-  
-  // Track new cards and set up highlight timer
-  useEffect(() => {
-      if (gameState?.newCardIds && gameState.newCardIds.length > 0) {
-          const newIds = new Set(gameState.newCardIds);
-          setHighlightedCardIds(prev => new Set([...prev, ...newIds]));
-          
-          // Clear highlight after 3 seconds
-          const timer = setTimeout(() => {
-              setHighlightedCardIds(prev => {
-                  const updated = new Set(prev);
-                  gameState.newCardIds!.forEach(id => updated.delete(id));
-                  return updated;
-              });
-          }, 3000);
-          
-          return () => clearTimeout(timer);
-      }
-  }, [gameState?.newCardIds]);
-  
-  // Track chat messages and show bubbles
-  useEffect(() => {
-      if (chatMessages.length === 0) return;
-      const lastMsg = chatMessages[chatMessages.length - 1];
-      if (lastMsg.seatIndex === undefined) return;
-      const seat = lastMsg.seatIndex;
-      setChatBubbles(prev => ({ ...prev, [seat]: lastMsg.text }));
-      window.clearTimeout(bubbleTimers.current[seat]);
-      bubbleTimers.current[seat] = window.setTimeout(() => {
-          setChatBubbles(prev => {
-              const updated = { ...prev };
-              delete updated[seat];
-              return updated;
-          });
-      }, 5000);
-  }, [chatMessages.length]);
-  
-  // Auto-scroll chat
-  useEffect(() => {
-      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages]);
-
-  const getPlayerAt = (offset: number) => {
-    const seat = (mySeat + offset) % 4;
-    const player = roomState.players.find(p => p && p.seatIndex === seat);
-    const handCount = gameState ? (
-      seat === mySeat 
-        ? (gameState.hands[seat] as CardType[]).length 
-        : (gameState.hands[seat] as number)
-    ) : 0;
-    
-    // Team identification
-    const isTeammate = (mySeat + 2) % 4 === seat;
-    const isOpponent = !isTeammate && seat !== mySeat;
-    
-    return { player, handCount, seat, isTeammate, isOpponent };
-  };
-
-  const top = getPlayerAt(2);
-  const left = getPlayerAt(3);
-  const right = getPlayerAt(1);
-  const me = getPlayerAt(0);
+  const [highlightedCardIds, setHighlightedCardIds] = useState<Set<string>>(new Set());
+  const [chatBubbles, setChatBubbles] = useState<Record<number, string>>({});
+  const bubbleTimers = useRef<Record<number, number>>({});
+  const chatListRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLInputElement>(null);
+  const chatButtonRef = useRef<HTMLButtonElement>(null);
+  const chatFollowRef = useRef(true);
+  const handTitleId = useId();
+  const selectionId = useId();
+  const chatId = useId();
 
   const level = gameState?.level ?? 2;
-  const handCards = gameState && mySeat >= 0 && Array.isArray(gameState.hands[mySeat])
-    ? (gameState.hands[mySeat] as CardType[])
-    : EMPTY_HAND;
+  const handCards = gameState && Array.isArray(gameState.hands[mySeat]) ? gameState.hands[mySeat] as CardType[] : EMPTY_HAND;
   const groups = useMemo(() => arrangeHand(handCards, level), [handCards, level]);
-  const straightFlushIds = useMemo(() => {
-    const ids = new Set<string>();
-    groups.filter(g => g.type === HandType.StraightFlush).forEach(g => g.cards.forEach(c => ids.add(c.id)));
-    return ids;
-  }, [groups]);
-  const visibleCards = viewMode === 'rank' ? sortCards(handCards, level) : groups.flatMap(g => g.cards);
+  const visibleCards = viewMode === 'rank' ? sortCards(handCards, level) : groups.flatMap(group => group.cards);
+  const selectedIds = useMemo(() => new Set(selectedCardIds), [selectedCardIds]);
+  const selectedCards = useMemo(() => handCards.filter(card => selectedIds.has(card.id)), [handCards, selectedIds]);
+  const target = gameState?.lastHand && gameState.lastHand.playerIndex !== mySeat ? gameState.lastHand.hand as Hand : null;
+  const selection = useMemo(() => evaluateSelection(selectedCards, level, target), [selectedCards, level, target]);
+  const isMyTurn = !interactionDisabled && gameState?.phase === 'Playing' && gameState.currentTurn === mySeat && handCards.length > 0;
+  const isTributePhase = gameState?.phase === 'Tribute' || gameState?.phase === 'ReturnTribute';
+  const amIPaying = !interactionDisabled && !!(isTributePhase && (gameState.phase === 'Tribute' ? gameState.tributeState?.pendingTributes : gameState.tributeState?.pendingReturns)?.some(tribute => tribute.from === mySeat && !tribute.card));
+  const tributeHintIds = useMemo(() => amIPaying ? getTributeEligibleIds(handCards, level, gameState?.phase || '') : new Set<string>(), [amIPaying, handCards, level, gameState?.phase]);
+  const validTribute = selectedCards.length === 1 && tributeHintIds.has(selectedCards[0].id);
+  const straightFlushIds = useMemo(() => new Set(groups.filter(group => group.type === HandType.StraightFlush).flatMap(group => group.cards.map(card => card.id))), [groups]);
+  const handKey = handCards.map(card => card.id).join('|');
+  const newCardKey = gameState?.newCardIds?.join('|') || '';
 
   useEffect(() => {
-    setSelectedCardIds(prev => {
-      const next = prev.filter(id => handCards.some(c => c.id === id));
-      return next.length === prev.length ? prev : next;
+    setSelectedCardIds(previous => {
+      const next = previous.filter(id => handCards.some(card => card.id === id));
+      return next.length === previous.length ? previous : next;
     });
   }, [handCards]);
 
-  const toggleGroup = (group: CardGroup) => {
-    const ids = group.cards.map(c => c.id);
-    const allSelected = ids.every(id => selectedCardIds.includes(id));
-    setSelectedCardIds(prev => allSelected
-      ? prev.filter(id => !ids.includes(id))
-      : [...new Set([...prev, ...ids])]);
-  };
+  useEffect(() => {
+    if (interactionDisabled) {
+      setShowHistory(false);
+      setPendingSkill(null);
+      setPossibleHands([]);
+    }
+  }, [interactionDisabled]);
+
+  useEffect(() => {
+    setPossibleHands([]);
+    setFeedback('');
+  }, [gameState?.currentTurn, gameState?.phase, gameState?.currentRound, handKey]);
+
+  useEffect(() => {
+    if (pendingSkill && (!isMyTurn || !gameState?.mySkillCards?.some(skill => skill.id === pendingSkill.id))) setPendingSkill(null);
+  }, [isMyTurn, gameState?.mySkillCards, pendingSkill]);
+
+  useEffect(() => {
+    if (!newCardKey) {
+      setHighlightedCardIds(new Set());
+      return;
+    }
+    const ids = newCardKey.split('|');
+    setHighlightedCardIds(new Set(ids));
+    const timer = window.setTimeout(() => setHighlightedCardIds(new Set()), 3000);
+    return () => window.clearTimeout(timer);
+  }, [newCardKey]);
+
+  useEffect(() => {
+    const last = chatMessages[chatMessages.length - 1];
+    if (!last || last.seatIndex === undefined) return;
+    setChatBubbles(previous => ({ ...previous, [last.seatIndex]: last.text }));
+    window.clearTimeout(bubbleTimers.current[last.seatIndex]);
+    bubbleTimers.current[last.seatIndex] = window.setTimeout(() => {
+      setChatBubbles(previous => { const next = { ...previous }; delete next[last.seatIndex]; return next; });
+    }, 5000);
+  }, [chatMessages]);
+
+  useEffect(() => () => Object.values(bubbleTimers.current).forEach(timer => window.clearTimeout(timer)), []);
+  useEffect(() => {
+    const list = chatListRef.current;
+    if (showChat && list && chatFollowRef.current) list.scrollTop = list.scrollHeight;
+  }, [chatMessages, showChat]);
+  useEffect(() => { if (showChat) chatInputRef.current?.focus({ preventScroll: true }); }, [showChat]);
 
   const toggleSelect = (id: string) => {
-    setSelectedCardIds(prev => 
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
-    );
+    setFeedback('');
+    setSelectedCardIds(previous => previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id]);
   };
-
+  const toggleGroup = (group: CardGroup) => {
+    setFeedback('');
+    const ids = group.cards.map(card => card.id);
+    setSelectedCardIds(previous => ids.every(id => previous.includes(id)) ? previous.filter(id => !ids.includes(id)) : [...new Set([...previous, ...ids])]);
+  };
+  const clearSelection = () => { setSelectedCardIds([]); setFeedback(''); };
   const handlePlay = () => {
-    const cards = visibleCards.filter(c => selectedCardIds.includes(c.id));
-    
-    // Check if cards contain wild cards
-    const hasWild = cards.some(c => c.isWild);
-    
-    if (hasWild && gameState) {
-      // Get all possible hand types
-      const possibilities = getAllPossibleHandTypes(cards, gameState.level);
-      
-      if (possibilities.length > 1) {
-        // Multiple interpretations - show selector
-        setPossibleHands(possibilities);
-        setShowHandSelector(true);
-        return;
-      } else if (possibilities.length === 1) {
-        // Single interpretation - play directly
-        onPlay(cards, possibilities[0]);
-        return;
-      }
-    }
-    
-    // No wild cards or no valid interpretation - play as normal
-    onPlay(cards);
+    if (!isMyTurn || !selection.canPlay) return;
+    const possibilities = selectedCards.some(card => card.isWild) ? getAllPossibleHandTypes(selectedCards, level) : [];
+    if (possibilities.length > 1) { setPossibleHands(possibilities); return; }
+    onPlay(selectedCards, selection.hand || undefined);
   };
-  
-  const handleHandTypeSelect = (hand: Hand) => {
-    const cards = visibleCards.filter(c => selectedCardIds.includes(c.id));
-    onPlay(cards, hand);
-    setShowHandSelector(false);
-    setPossibleHands([]);
-  };
-  
   const handleHint = () => {
-      if (!gameState) return;
-      const bot = new Bot(visibleCards, gameState.level);
-      const target = gameState.lastHand && gameState.lastHand.playerIndex !== mySeat ? gameState.lastHand.hand : null;
-      const move = bot.decideMove(target);
-      
-      if (move) {
-          setSelectedCardIds(move.map(c => c.id));
-      } else {
-          setSelectedCardIds([]);
-      }
+    if (!isMyTurn) return;
+    const move = new Bot(visibleCards, level).decideMove(target);
+    if (move && evaluateSelection(move, level, target).canPlay) {
+      setSelectedCardIds(move.map(card => card.id));
+      setFeedback('已选好建议出牌，你可以调整后再出。');
+    } else {
+      setFeedback(target ? '暂未找到可出的组合。可以自行选牌，或选择「过」。' : '暂未找到建议组合，请自行选择手牌。');
+    }
   };
-  
-  const handleTributeAction = () => {
-      const cards = visibleCards.filter(c => selectedCardIds.includes(c.id));
-      if (cards.length !== 1) {
-          alert("请选择一张牌");
-          return;
-      }
-      if (gameState.phase === 'Tribute' && onTribute) onTribute(cards);
-      if (gameState.phase === 'ReturnTribute' && onReturnTribute) {
-          const card = cards[0];
-          const hasLegal = visibleCards.some(c => c.rank <= Rank.Ten && c.rank !== gameState.level);
-          const isLegal = card.rank <= Rank.Ten && card.rank !== gameState.level;
-          if (!isLegal && hasLegal) {
-              alert('还贡只能出 10 及以下，且不能是级牌或王');
-              return;
-          }
-          onReturnTribute(cards);
-      }
+  const handleTribute = () => {
+    if (!amIPaying || !validTribute) return;
+    if (gameState?.phase === 'Tribute') onTribute?.(selectedCards);
+    else onReturnTribute?.(selectedCards);
   };
-  
-  const handleChatSubmit = (e: React.FormEvent) => {
-      e.preventDefault();
-      if (chatInput.trim()) {
-          onSendChat(chatInput.trim());
-          setChatInput('');
-      }
-  }
-  
-  // Skill card handlers
-  const handleSkillClick = (skill: SkillCard) => {
-      const needsTarget = [SkillCardType.Steal, SkillCardType.Discard, SkillCardType.Skip];
-      if (needsTarget.includes(skill.type)) {
-          setPendingSkill(skill);
-          setShowTargetSelect(true);
-      } else {
-          // No target needed, use immediately
-          onUseSkill?.(skill.id);
-      }
+  const handleSkill = (skill: SkillCard) => {
+    if (!isMyTurn || !onUseSkill) return;
+    if ([SkillCardType.Steal, SkillCardType.Discard, SkillCardType.Skip].includes(skill.type)) setPendingSkill(skill);
+    else onUseSkill(skill.id);
   };
-  
-  const handleTargetSelect = (targetSeat: number) => {
-      if (pendingSkill) {
-          onUseSkill?.(pendingSkill.id, targetSeat);
-          setPendingSkill(null);
-          setShowTargetSelect(false);
-      }
-  };
-  
-  const handleTargetCancel = () => {
-      setPendingSkill(null);
-      setShowTargetSelect(false);
-  };
-  
-  // Get players for target selection
-  const getPlayersForTargeting = () => {
-      return roomState.players
-          .filter((p): p is NonNullable<typeof p> => p !== null)
-          .map(p => ({
-              name: p.name,
-              seatIndex: p.seatIndex,
-              handCount: gameState 
-                  ? (typeof gameState.hands[p.seatIndex] === 'number' 
-                      ? gameState.hands[p.seatIndex] as number 
-                      : (gameState.hands[p.seatIndex] as CardType[]).length)
-                  : 0
-          }));
+  const closeChat = () => { setShowChat(false); setShowEmojiPicker(false); chatButtonRef.current?.focus({ preventScroll: true }); };
+  const handleChatSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    const message = chatInput.trim();
+    if (!message) return;
+    if (message.length > CHAT_MAX_LENGTH) {
+      setChatError('消息最多 200 个字符，请缩短后再发送。');
+      return;
+    }
+    onSendChat(message);
+    setChatInput('');
+    setChatError('');
+    chatFollowRef.current = true;
   };
 
-  const isTributePhase = gameState && (gameState.phase === 'Tribute' || gameState.phase === 'ReturnTribute');
-  const amIPaying = isTributePhase && gameState.tributeState && (
-      (gameState.phase === 'Tribute' && gameState.tributeState.pendingTributes.some((t: any) => t.from === mySeat)) ||
-      (gameState.phase === 'ReturnTribute' && gameState.tributeState.pendingReturns.some((t: any) => t.from === mySeat))
-  );
-
-  const tributeHintIds = useMemo(() => {
-      if (!amIPaying || !gameState) return new Set<string>();
-      if (gameState.phase === 'Tribute') {
-          const max = Math.max(...handCards.map(card => getLogicValue(card.rank, level)));
-          return new Set(handCards.filter(card => getLogicValue(card.rank, level) === max).map(card => card.id));
-      }
-      const legal = handCards.filter(card => card.rank <= Rank.Ten && card.rank !== level);
-      if (legal.length > 0) return new Set(legal.map(card => card.id));
-      const min = Math.min(...handCards.map(card => getLogicValue(card.rank, level)));
-      return new Set(handCards.filter(card => getLogicValue(card.rank, level) === min).map(card => card.id));
-  }, [amIPaying, gameState, handCards, level]);
-
-  const renderLastHand = () => {
-    if (!gameState || !gameState.lastHand) return null;
-    const { playerIndex, hand } = gameState.lastHand;
-    const playerName = roomState.players.find(p => p && p.seatIndex === playerIndex)?.name || `Seat ${playerIndex}`;
-    
-    return (
-      <div className="bg-green-700/50 p-4 rounded-lg flex flex-col items-center">
-        <div className="text-white mb-2 font-bold">{playerName} 出牌:</div>
-        <div className="flex -space-x-8">
-           {hand.cards.map((c: CardType) => (
-             <Card key={c.id} card={c} />
-           ))}
-        </div>
-        <div className="text-yellow-300 font-bold mt-2">{getHandDescription(hand, gameState.level)}</div>
-      </div>
-    );
-  };
-
-  // Helper to render cards played in round action
-  const renderActionCards = (cards: CardType[] | undefined) => {
-      if (!cards || cards.length === 0) return null;
-      return (
-          <div className="flex gap-0.5 mt-1">
-              {cards.slice(0, 6).map((card, i) => (
-                  <div key={i} className="w-6 h-8 bg-white rounded text-xs flex items-center justify-center font-bold border border-gray-300"
-                       style={{ color: (card.suit === Suit.Hearts || card.suit === Suit.Diamonds) ? 'red' : 'black' }}>
-                      {card.rank === Rank.SmallJoker ? '🃏' : card.rank === Rank.BigJoker ? '🃟' : 
-                       ['', '', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'][card.rank] || '?'}
-                  </div>
-              ))}
-              {cards.length > 6 && <span className="text-white text-xs">+{cards.length - 6}</span>}
-          </div>
-      );
-  };
-
-  const PlayerArea = ({ data, pos }: { data: any, pos: string }) => {
-    const action = gameState?.roundActions?.[data.seat];
-    const bubble = chatBubbles[data.seat];
-    
-    // Get winner position (头游、二游、三游、末游)
-    const getWinnerPosition = () => {
-      if (!gameState || !gameState.winners) return null;
-      const position = gameState.winners.indexOf(data.seat);
-      if (position === -1) return null;
-      const labels = ['头游', '二游', '三游', '末游'];
-      const colors = ['bg-yellow-500', 'bg-orange-500', 'bg-purple-500', 'bg-gray-500'];
-      return { label: labels[position], color: colors[position] };
-    };
-    
-    const winnerPos = getWinnerPosition();
-    
-    return (
-      <div 
-          className={`absolute ${pos} flex flex-col items-center p-4 rounded-lg transition-colors ${data.isTeammate ? 'bg-blue-900/40 border-2 border-blue-400' : 'bg-black/20'} ${!gameState && !data.player ? 'cursor-pointer hover:bg-white/10' : ''}`}
-          onClick={() => !gameState && !data.player && onSwitchSeat(data.seat)}
-      >
-         {/* Chat Bubble */}
-         {bubble && (
-           <div className="absolute -top-16 left-1/2 -translate-x-1/2 z-50 animate-bounce-in">
-             <div className="relative bg-white text-gray-800 px-4 py-2 rounded-xl shadow-lg max-w-48 text-sm font-medium whitespace-pre-wrap">
-               {bubble}
-               {/* Bubble arrow */}
-               <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white"></div>
-             </div>
-           </div>
-         )}
-         
-         <div className="w-12 h-12 bg-gray-300 rounded-full flex items-center justify-center mb-2 relative">
-           {data.player ? data.player.name[0].toUpperCase() : (gameState ? '?' : '+')}
-           {data.isTeammate && <div className="absolute -top-1 -right-1 bg-blue-500 text-xs text-white px-1 rounded">友</div>}
-           {data.isOpponent && <div className="absolute -top-1 -right-1 bg-red-500 text-xs text-white px-1 rounded">敌</div>}
-           {data.player && data.player.isHost && (
-               <div className="absolute -bottom-1 -right-1 text-xs bg-yellow-500 text-black px-1 rounded font-bold border border-white">
-                   房主
-               </div>
-           )}
-           {/* Winner Position Badge */}
-           {winnerPos && (
-               <div className={`absolute -top-2 left-1/2 -translate-x-1/2 ${winnerPos.color} text-white text-xs px-2 py-0.5 rounded-full font-bold shadow-lg border-2 border-white animate-pulse`}>
-                   {winnerPos.label}
-               </div>
-           )}
-         </div>
-         <div className="text-white font-bold flex items-center gap-2">
-             {data.player ? data.player.name : (gameState ? '等待中' : '点击入座')}
-             {data.player && (data.player as any).isDisconnected && (
-                 <span className="text-red-500 text-xs font-bold bg-white px-1 rounded animate-pulse">OFF</span>
-             )}
-         </div>
-         {gameState && <div className="text-yellow-400">剩余 {data.handCount}</div>}
-         {data.player && data.player.isReady && !gameState && <div className="text-green-400 text-sm">已准备</div>}
-         
-         {/* Show current round action */}
-         {gameState && action && (
-             <div className="mt-2 flex flex-col items-center">
-                 {action.type === 'pass' ? (
-                     <div className="text-gray-400 font-bold text-sm bg-gray-700/50 px-3 py-1 rounded">过</div>
-                 ) : (
-                     <div className="flex flex-col items-center">
-                         <div className="text-green-400 text-xs mb-1">{action.hand ? getHandDescription(action.hand, gameState.level) : '出牌'}</div>
-                         {renderActionCards(action.cards)}
-                     </div>
-                 )}
-             </div>
-         )}
-         
-         {gameState && gameState.currentTurn === data.seat && !action && (
-             data.seat === mySeat
-               ? <div className="text-yellow-300 font-bold mt-2">轮到你了</div>
-               : <div className="text-gray-300 font-bold mt-2">思考中</div>
-         )}
-      </div>
-    );
-  };
-
-  const getStackedMatrix = () => {
-      const columns: { key: string; slots: { [key: number]: CardType[] } }[] = [];
-      const pushColumn = (key: string, cards: CardType[]) => {
-          if (cards.length === 0) return;
-          const slots: { [key: number]: CardType[] } = {
-              [Suit.Joker]: [],
-              [Suit.Spades]: [],
-              [Suit.Hearts]: [],
-              [Suit.Clubs]: [],
-              [Suit.Diamonds]: []
-          };
-          cards.forEach(c => {
-              if (c.rank >= Rank.SmallJoker) slots[Suit.Joker].push(c);
-              else slots[c.suit].push(c);
-          });
-          columns.push({ key, slots });
-      };
-      pushColumn('big', handCards.filter(c => c.rank === Rank.BigJoker));
-      pushColumn('small', handCards.filter(c => c.rank === Rank.SmallJoker));
-      for (let rank = Rank.Ace; rank >= Rank.Two; rank--) {
-          pushColumn(String(rank), handCards.filter(c => c.rank === rank));
-      }
-      return columns;
-  };
+  if (!gameState) return null;
+  const myTeam = mySeat >= 0 ? mySeat % 2 : 0;
+  const me = roomState.players.find(player => player?.seatIndex === mySeat);
+  const currentPlayer = roomState.players.find(player => player?.seatIndex === gameState.currentTurn);
+  const lastPlayer = roomState.players.find(player => player?.seatIndex === gameState.lastHand?.playerIndex);
+  const turnText = gameState.phase === 'Score' ? '本局结束' : amIPaying ? gameState.phase === 'Tribute' ? '请进贡最大牌' : '请选择还贡牌' : isTributePhase ? '等待其他玩家进贡 / 还贡' : handCards.length === 0 ? '你已出完，看看队友的表现' : isMyTurn ? '轮到你了' : `等待 ${currentPlayer?.name || '其他玩家'} 出牌`;
+  const tributeText = gameState.phase === 'Tribute' ? '选择一张黄框标出的最大牌' : handCards.some(card => card.rank <= Rank.Ten && card.rank !== level) ? '还贡 10 及以下，不能是级牌或王；黄框为可选牌' : '没有普通可还牌，请选择黄框标出的最小牌';
+  const selectionMessage = amIPaying ? selectedCards.length === 0 ? tributeText : validTribute ? '这张牌可以提交' : '请选择且只选择一张黄框牌' : isTributePhase ? '等待其他玩家提交进贡 / 还贡' : selection.canPlay && !isMyTurn ? `${getHandDescription(selection.hand!, level)} · 牌型有效，等待你的回合` : selection.message;
+  const renderHandCard = (card: CardType, small = false) => <Card key={card.id} card={card} selected={selectedIds.has(card.id)} onClick={() => toggleSelect(card.id)} small={small} isHighlighted={highlightedCardIds.has(card.id)} hint={tributeHintIds.has(card.id)} />;
 
   return (
-    <div className="relative w-full h-screen bg-[#1e1e1e] overflow-hidden flex items-center justify-center font-mono">
-      <div className="absolute inset-20 border-2 border-[#333333] rounded-xl opacity-50 pointer-events-none"></div>
+    <div className="game-screen">
+      <header className="game-header">
+        <div className="game-header__identity"><span className="game-eyebrow">GUANDAN / 房间 {roomState.roomId}</span><div className="game-header__title"><h1>当前 打{formatLevelRank(level)}</h1><span className="game-badge">第 {gameState.currentRound || 1} 局</span>{gameState.gameMode === GameMode.Skill && <span className="game-badge game-badge--violet">技能局</span>}</div></div>
+        {gameState.teamLevels && <div className="game-scoreline"><span>我方 <strong>打{formatLevelRank(gameState.teamLevels[myTeam])}</strong>{gameState.activeTeam === myTeam && <i>庄</i>}</span><span>对方 <strong>打{formatLevelRank(gameState.teamLevels[1 - myTeam])}</strong>{gameState.activeTeam === 1 - myTeam && <i>庄</i>}</span></div>}
+        <nav className="game-header__actions" aria-label="牌桌工具">
+          <button ref={chatButtonRef} type="button" className={`game-button ${showChat ? 'is-on' : ''}`} aria-expanded={showChat} aria-controls={chatId} onClick={() => showChat ? closeChat() : setShowChat(true)}>聊天</button>
+          <button type="button" className="game-button" onClick={() => setShowHistory(true)}>历史记录</button>
+          {onLeave && <button type="button" className="game-button" onClick={onLeave}>离开房间</button>}
+          {me?.isHost && onForceEndGame && <button type="button" className="game-button game-button--quiet-danger" onClick={() => { if (window.confirm('确定强制结束整场对局吗？当前进度将丢失，所有玩家返回准备房间。')) onForceEndGame(); }}>结束对局</button>}
+        </nav>
+      </header>
 
-      <PlayerArea data={top} pos="top-4 left-1/2 -translate-x-1/2" />
-      <PlayerArea data={left} pos="left-8 top-1/2 -translate-y-1/2" />
-      <PlayerArea data={right} pos="right-8 top-1/2 -translate-y-1/2" />
-      
-      {/* Chat Box。默认收起，避免挡住右侧玩家。 */}
-      <button
-          type="button"
-          onClick={() => setShowChat(open => !open)}
-          className="absolute top-4 right-4 z-20 bg-[#252526] border border-[#333333] text-white text-sm px-3 py-1 rounded pointer-events-auto"
-      >
-          {showChat ? '收起聊天' : '聊天'}
-      </button>
-      {showChat && (
-      <div className="absolute top-14 right-4 w-72 max-h-56 bg-[#252526] border border-[#333333] rounded flex flex-col pointer-events-auto z-10 shadow-lg">
-          <div className="flex-1 overflow-y-auto p-2 text-sm text-[#d4d4d4] scrollbar-thin">
-              {chatMessages.map((msg, i) => (
-                  <div key={i} className="mb-1">
-                      <span className="text-[#858585] text-xs">[{msg.time}] </span>
-                      <span className="font-bold text-[#569cd6]">{msg.sender}: </span>
-                      <span className="break-words">{msg.text}</span>
-                  </div>
-              ))}
-              <div ref={chatEndRef} />
-          </div>
-          
-          {/* Emoji Picker */}
-          {showEmojiPicker && (
-              <div className="p-2 border-t border-[#333333] bg-[#1e1e1e] grid grid-cols-10 gap-1">
-                  {quickEmojis.map((emoji, i) => (
-                      <button 
-                          key={i} 
-                          type="button"
-                          onClick={() => {
-                              setChatInput(prev => prev + emoji);
-                              setShowEmojiPicker(false);
-                          }}
-                          className="text-lg hover:bg-[#3c3c3c] rounded p-1 transition-colors"
-                      >
-                          {emoji}
-                      </button>
-                  ))}
-              </div>
-          )}
-          
-          <form onSubmit={handleChatSubmit} className="p-2 border-t border-[#333333] flex items-center gap-1">
-              <button 
-                  type="button" 
-                  onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                  className="text-lg hover:bg-[#3c3c3c] rounded p-1"
-                  title="表情"
-              >
-                  😊
-              </button>
-              <input 
-                  className="flex-1 bg-[#3c3c3c] border-none text-white text-sm focus:outline-none rounded px-2 py-1" 
-                  placeholder="输入消息..." 
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-              />
-              <button type="submit" className="text-[#0e639c] font-bold text-sm hover:text-[#1177bb]">发送</button>
-          </form>
-      </div>
-      )}
+      <div className={`game-workspace${showChat ? ' has-chat' : ''}`}>
+        <main className="game-board" aria-label="对局牌桌">
+          {([{ offset: 2, position: 'top' }, { offset: 3, position: 'left' }, { offset: 1, position: 'right' }]).map(({ offset, position }) => {
+            const seat = (mySeat + offset) % 4;
+            return <PlayerSeat key={seat} player={roomState.players.find(player => player?.seatIndex === seat)} seat={seat} mySeat={mySeat} position={position} gameState={gameState} bubble={chatBubbles[seat]} />;
+          })}
+          <section className="game-center" aria-label="桌面出牌">
+            {gameState.lastHand ? <>
+              <p className="game-eyebrow">{lastPlayer?.name || '玩家'} 出牌</p>
+              <div className="game-center__cards">{gameState.lastHand.hand.cards.map((card: CardType) => <Card key={card.id} card={card} small />)}</div>
+              <span className="game-badge game-badge--teal">{getHandDescription(gameState.lastHand.hand, level)}</span>
+            </> : <div className="game-center__empty"><span aria-hidden="true">♠</span><p>{isTributePhase ? '进贡 / 还贡阶段' : '新的出牌轮次'}</p><small>{isTributePhase ? '黄框标出了可提交的牌' : isMyTurn ? '你可以自由出牌' : '等待首家出牌'}</small></div>}
+          </section>
+          <div className="game-board__caption">红心{formatLevelRank(level)}是万能牌 · 座位相对的玩家为队友</div>
+        </main>
 
-      {gameState && (
-          <div className="absolute top-4 left-4 flex flex-col gap-2 items-start z-50">
-              <div className="text-[#d4d4d4] font-bold bg-[#252526] border border-[#333333] px-4 py-2 rounded shadow-lg text-sm leading-6">
-                  <div className="text-lg">当前 打{formatLevelRank(gameState.level)}</div>
-                  {gameState.teamLevels && (
-                    <>
-                      <div>
-                        我方 打{formatLevelRank(gameState.teamLevels[mySeat >= 0 ? mySeat % 2 : 0])}
-                        {gameState.activeTeam === (mySeat >= 0 ? mySeat % 2 : 0) ? ' · 庄' : ''}
-                      </div>
-                      <div>
-                        对方 打{formatLevelRank(gameState.teamLevels[mySeat >= 0 ? 1 - (mySeat % 2) : 1])}
-                        {gameState.activeTeam === (mySeat >= 0 ? 1 - (mySeat % 2) : 1) ? ' · 庄' : ''}
-                      </div>
-                    </>
-                  )}
-              </div>
-              
-              {/* Host Force End Button */}
-              {me.player && me.player.isHost && (
-                <button 
-                    onClick={() => {
-                        if (confirm('⚠️ 确定要强制结束当前游戏吗？所有进度将丢失。')) {
-                            onForceEndGame?.();
-                        }
-                    }}
-                    className="bg-red-900/80 hover:bg-red-600 text-white text-xs px-3 py-1 rounded border border-red-500/50 shadow-lg backdrop-blur-sm transition-all flex items-center gap-1"
-                >
-                    <span>⛔</span> 强制结束
-                </button>
-              )}
-              {me.player && (
-                <button
-                    type="button"
-                    onClick={onLeave}
-                    className="bg-[#252526] hover:bg-[#3c3c3c] text-white text-xs px-3 py-1 rounded border border-[#333333]"
-                >
-                    离开房间
-                </button>
-              )}
+        {showChat && <aside className="game-chat" id={chatId} aria-label="房间聊天" onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); closeChat(); } }}>
+          <div className="game-chat__header"><strong>房间聊天</strong><button type="button" className="game-button" onClick={closeChat} aria-label="关闭聊天">×</button></div>
+          <div ref={chatListRef} className="game-chat__messages" role="log" aria-label="聊天消息" onScroll={event => { const el = event.currentTarget; chatFollowRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
+            {chatMessages.length === 0 && <p className="game-muted">打个招呼吧。消息仅在当前房间可见。</p>}
+            {chatMessages.map((message, index) => <div className="game-chat__message" key={`${message.time}-${index}`}><div><strong>{message.sender}</strong><time>{message.time}</time></div><p>{message.text}</p></div>)}
           </div>
-      )}
-      
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-        {renderLastHand()}
-        {!gameState && (
-            <div className="flex flex-col gap-4 mt-8 items-center">
-               <div className="text-white text-xl">等待玩家入座</div>
-               
-               {/* Game Mode Toggle - Only host can change */}
-               <div className="flex items-center gap-4 bg-[#252526] px-4 py-2 rounded-lg border border-[#333333]">
-                   <span className="text-[#9cdcfe] font-bold">模式:</span>
-                   <button 
-                       onClick={() => onSetGameMode?.(GameMode.Normal)}
-                       disabled={!me.player?.isHost}
-                       className={`px-4 py-1 rounded font-bold transition-all ${
-                           roomState.gameMode !== GameMode.Skill 
-                               ? 'bg-blue-600 text-white' 
-                               : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
-                       } ${!me.player?.isHost ? 'cursor-not-allowed opacity-70' : ''}`}
-                   >
-                       普通
-                   </button>
-                   <button 
-                       onClick={() => onSetGameMode?.(GameMode.Skill)}
-                       disabled={!me.player?.isHost}
-                       className={`px-4 py-1 rounded font-bold transition-all ${
-                           roomState.gameMode === GameMode.Skill 
-                               ? 'bg-purple-600 text-white' 
-                               : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
-                       } ${!me.player?.isHost ? 'cursor-not-allowed opacity-70' : ''}`}
-                   >
-                       技能
-                   </button>
-               </div>
-               {roomState.gameMode === GameMode.Skill && (
-                   <div className="text-purple-400 text-sm">技能模式: 每人开局获得2张技能卡</div>
-               )}
-               
-               {me.player && !gameState && (
-                   <button onClick={onReady} className="bg-blue-500 text-white px-6 py-2 rounded font-bold">
-                       {me.player.isReady ? '取消准备' : '准备'}
-                   </button>
-               )}
-               {me.player && me.player.isHost && !gameState && (
-                   <button onClick={onStart} className="bg-yellow-500 text-black px-6 py-2 rounded font-bold">开始游戏</button>
-               )}
-               {me.player && (
-                   <button onClick={onLeave} className="bg-gray-600 text-white px-6 py-2 rounded font-bold">离开房间</button>
-               )}
-            </div>
-        )}
+          {showEmojiPicker && <div className="game-chat__emoji">{QUICK_EMOJIS.map(emoji => <button type="button" key={emoji} aria-label={`添加表情 ${emoji}`} disabled={chatInput.length + emoji.length > CHAT_MAX_LENGTH} onClick={() => { setChatInput(previous => previous.length + emoji.length <= CHAT_MAX_LENGTH ? previous + emoji : previous); setShowEmojiPicker(false); chatInputRef.current?.focus(); }}>{emoji}</button>)}</div>}
+          <form className="game-chat__form" onSubmit={handleChatSubmit}><button type="button" className="game-button" aria-label="选择表情" aria-expanded={showEmojiPicker} onClick={() => setShowEmojiPicker(previous => !previous)}>☺</button><input ref={chatInputRef} aria-label="聊天消息" placeholder="输入消息…" maxLength={CHAT_MAX_LENGTH} value={chatInput} onChange={event => { setChatInput(event.target.value); setChatError(''); }} /><button type="submit" className="game-button game-button--primary" disabled={!chatInput.trim() || chatInput.trim().length > CHAT_MAX_LENGTH}>发送</button></form>
+          <div className="game-chat__limit"><span role="alert">{chatError}</span><span>{chatInput.length} / {CHAT_MAX_LENGTH}</span></div>
+        </aside>}
       </div>
 
-      <div className="absolute bottom-0 w-full flex flex-col items-center pb-4 z-20 pointer-events-none">
-        {/* Skill Cards Area */}
-        {gameState && gameState.gameMode === GameMode.Skill && gameState.mySkillCards && gameState.mySkillCards.length > 0 && (
-            <div className="mb-4 pointer-events-auto flex flex-col items-center">
-                <div className="text-purple-400 text-sm mb-2 font-bold">我的技能卡</div>
-                <div className="flex gap-3">
-                    {gameState.mySkillCards.map((skill) => (
-                        <SkillCardButton 
-                            key={skill.id} 
-                            skill={skill} 
-                            onClick={() => handleSkillClick(skill)}
-                            disabled={gameState.currentTurn !== mySeat || gameState.phase !== 'Playing'}
-                        />
-                    ))}
-                </div>
-                {gameState.currentTurn === mySeat && gameState.phase === 'Playing' && (
-                    <div className="text-xs text-gray-400 mt-1">点击技能卡使用（使用后仍可出牌）</div>
-                )}
-            </div>
-        )}
-
-        {/* Controls Container */}
-        <div className="mb-8 pointer-events-auto">
-            {gameState && gameState.currentTurn === mySeat && gameState.phase === 'Playing' && (
-                <div className="flex flex-col items-center gap-3">
-                <div className="text-yellow-300 font-bold text-lg">轮到你了</div>
-                <div className="flex gap-4">
-                    <button 
-                      onClick={handleHint}
-                      className="bg-yellow-500 hover:bg-yellow-600 text-black px-4 py-2 rounded-full font-bold shadow-lg mr-4"
-                    >
-                      提示
-                    </button>
-                    <button 
-                      onClick={handlePlay} 
-                      disabled={selectedCardIds.length === 0}
-                      className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-2 rounded-full font-bold shadow-lg disabled:opacity-50"
-                    >
-                      出牌
-                    </button>
-                    <button 
-                      onClick={onPass}
-                      disabled={!gameState.lastHand || gameState.lastHand.playerIndex === mySeat}
-                      className="bg-red-600 hover:bg-red-700 text-white px-8 py-2 rounded-full font-bold shadow-lg disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      过
-                    </button>
-                </div>
-                </div>
-            )}
-            
-            {amIPaying && (
-                <div className="flex gap-4">
-                   <div className="text-yellow-400 font-bold text-xl animate-pulse">
-                       {gameState!.phase === 'Tribute' ? '请进贡最大牌' : '还贡 10 及以下，不能是级牌或王'}
-                   </div>
-                   <button 
-                      onClick={handleTributeAction} 
-                      className="bg-purple-600 hover:bg-purple-700 text-white px-8 py-2 rounded-full font-bold shadow-lg"
-                   >
-                      确认
-                   </button>
-                </div>
-            )}
-        </div>
-
-        {gameState && handCards.length > 0 && (
-            <div className="mb-2 pointer-events-auto flex gap-2">
-                {([
-                    ['arranged', '理牌'],
-                    ['rank', '点数'],
-                    ['stacked', '同花顺'],
-                ] as const).map(([mode, label]) => (
-                    <button
-                        key={mode}
-                        onClick={() => setViewMode(mode)}
-                        className={`px-3 py-1 rounded-full text-sm font-bold ${viewMode === mode ? 'bg-yellow-500 text-black' : 'bg-gray-600 text-white hover:bg-gray-500'}`}
-                    >
-                        {label}
-                    </button>
-                ))}
-                {viewMode === 'arranged' && (
-                    <span className="text-xs text-gray-400 self-center">点组名选中整组</span>
-                )}
-            </div>
-        )}
-
-        {/* Hand Area */}
-        <div className={`w-full max-w-[100vw] overflow-x-auto px-4 pt-8 pointer-events-auto ${viewMode === 'stacked' ? 'h-72' : 'h-52'}`}>
-          {viewMode === 'arranged' ? (
-              <div className="flex items-end justify-center gap-3 min-w-max mx-auto h-full">
-                  {groups.map(group => (
-                      <div key={group.id} className="flex flex-col items-center">
-                          <button
-                              type="button"
-                              onClick={() => toggleGroup(group)}
-                              className="text-xs leading-none mb-1 text-yellow-200 hover:text-white"
-                              title="点此选中整组"
-                          >
-                              {group.label}
-                          </button>
-                          <div className="flex -space-x-8">
-                              {group.cards.map(card => (
-                                  <Card
-                                      key={card.id}
-                                      card={card}
-                                      selected={selectedCardIds.includes(card.id)}
-                                      onClick={() => toggleSelect(card.id)}
-                                      isHighlighted={highlightedCardIds.has(card.id)}
-                                      hint={tributeHintIds.has(card.id)}
-                                  />
-                              ))}
-                          </div>
-                      </div>
-                  ))}
-              </div>
-          ) : viewMode === 'rank' ? (
-              <div className="flex items-end justify-center -space-x-8 min-w-max mx-auto h-full">
-              {visibleCards.map((card: CardType) => (
-                <Card 
-                  key={card.id} 
-                  card={card} 
-                  selected={selectedCardIds.includes(card.id)}
-                  onClick={() => toggleSelect(card.id)}
-                  isHighlighted={highlightedCardIds.has(card.id)}
-                  hint={tributeHintIds.has(card.id)}
-                />
-              ))}
-              </div>
-          ) : (
-              <div className="flex items-end justify-center gap-1 min-w-max mx-auto h-full">
-              {getStackedMatrix().map((col, cIdx) => (
-                  <div key={cIdx} className="relative w-16 h-64 flex-shrink-0">
-                      {[Suit.Joker, Suit.Spades, Suit.Hearts, Suit.Clubs, Suit.Diamonds].map((suit, sIdx) => {
-                          const cards = col.slots[suit];
-                          if (!cards || cards.length === 0) return null;
-                          
-                          return cards.map((card, idx) => (
-                              <div 
-                                key={card.id} 
-                                className={`absolute transition-transform ${straightFlushIds.has(card.id) ? 'ring-2 ring-yellow-400 shadow-[0_0_10px_rgba(250,204,21,0.5)] rounded' : ''}`}
-                                style={{ 
-                                    bottom: `${(4 - sIdx) * 30 + (idx * 5)}px`, 
-                                    zIndex: sIdx * 10 + idx 
-                                }}
-                              >
-                                <Card 
-                                    card={card} 
-                                    selected={selectedCardIds.includes(card.id)}
-                                    onClick={() => toggleSelect(card.id)}
-                                    small 
-                                    isHighlighted={highlightedCardIds.has(card.id)}
-                                    hint={tributeHintIds.has(card.id)}
-                                />
-                              </div>
-                          ));
-                      })}
-                  </div>
-              ))}
-              </div>
-          )}
-        </div>
-        <div className="relative">
-          {/* My Chat Bubble */}
-          {chatBubbles[mySeat] && (
-            <div className="absolute -top-12 left-1/2 -translate-x-1/2 z-50 animate-bounce-in">
-              <div className="relative bg-white text-gray-800 px-4 py-2 rounded-xl shadow-lg max-w-48 text-sm font-medium whitespace-pre-wrap">
-                {chatBubbles[mySeat]}
-                <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white"></div>
-              </div>
-            </div>
-          )}
-          <div className="text-white font-bold mt-2 flex items-center gap-2">
-              <span>{me.player?.name}（我）</span>
-              {me.player?.isHost && <span className="text-xs bg-yellow-500 text-black px-1 rounded">房主</span>}
+      <section className="game-handdock" aria-label="我的手牌与操作">
+        <div className="game-turnbar"><div className={`game-turnbar__status${isMyTurn || amIPaying ? ' is-active' : ''}`} role="status"><span className="game-status-dot" /><strong>{turnText}</strong>{isMyTurn && <small>{target ? '跟牌' : '自由出牌'}</small>}</div><span className="game-muted game-me">{me?.name} · <strong>{handCards.length}</strong> 张</span></div>
+        <div className="game-actionbar">
+          <div className="game-selection" id={selectionId} role="status"><span className="game-selection__count">已选 <strong>{selectedCards.length}</strong> 张</span><span className={selectedCards.length > 0 && (amIPaying ? !validTribute : !selection.canPlay) ? 'game-warning' : 'game-muted'}>{selectionMessage}</span></div>
+          <div className="game-actionbar__buttons">
+            <button type="button" className="game-button" onClick={clearSelection} disabled={!selectedCards.length}>清空选择</button>
+            {amIPaying ? <button type="button" className="game-button game-button--primary" aria-describedby={selectionId} onClick={handleTribute} disabled={!validTribute}>{gameState.phase === 'Tribute' ? '确认进贡' : '确认还贡'}</button> : <>
+              <button type="button" className="game-button game-button--hint" onClick={handleHint} disabled={!isMyTurn}>提示</button>
+              <button type="button" className="game-button game-button--primary" onClick={handlePlay} disabled={!isMyTurn || !selection.canPlay} aria-describedby={selectionId}>出牌{selectedCards.length > 0 ? ` (${selectedCards.length})` : ''}</button>
+              <button type="button" className="game-button" onClick={() => { if (isMyTurn && target) onPass(); }} disabled={!isMyTurn || !target} title={isMyTurn && !target ? '自由出牌时不能过牌' : undefined}>过</button>
+            </>}
           </div>
         </div>
-      </div>
-      
-      {gameState && gameState.phase === 'Score' && (
-          <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center text-white z-50">
-              <h1 className="text-6xl font-bold mb-8 text-yellow-400">本局结束</h1>
-              <div className="text-2xl mb-4">
-                  获胜顺序: {gameState.winners.map(w => {
-                      const p = roomState.players.find(pl => pl && pl.seatIndex === w);
-                      return p ? p.name : `Seat ${w}`;
-                  }).join(' → ')}
-              </div>
-              {gameState.teamLevels && (
-                  <div className="text-xl text-gray-300 mb-4">
-                      我方 打{formatLevelRank(gameState.teamLevels[mySeat >= 0 ? mySeat % 2 : 0])}
-                      {' '}| 对方 打{formatLevelRank(gameState.teamLevels[mySeat >= 0 ? 1 - (mySeat % 2) : 1])}
-                  </div>
-              )}
-              <div className="text-lg text-yellow-300 animate-pulse">
-                  ⏳ 3秒后自动开始下一局...
-              </div>
-              <div className="text-sm text-gray-400 mt-4">
-                  (对局将持续到某队打到A并连胜两次)
-              </div>
+        {feedback && <p className="game-feedback" role="status">{feedback}</p>}
+        {gameState.gameMode === GameMode.Skill && !!gameState.mySkillCards?.length && <div className="game-skills"><span className="game-eyebrow">技能 / 用后仍可出牌</span><div>{gameState.mySkillCards.map(skill => <SkillCardButton key={skill.id} skill={skill} onClick={() => handleSkill(skill)} disabled={!isMyTurn || !onUseSkill} />)}</div></div>}
+        {handCards.length > 0 ? <>
+          <div className="game-handtools"><div className="game-segmented" role="group" aria-label="手牌视图">{([['arranged', '理牌'], ['rank', '点数'], ['stacked', '同花顺']] as const).map(([mode, label]) => <button key={mode} type="button" aria-pressed={viewMode === mode} onClick={() => setViewMode(mode)}>{label}</button>)}</div><span className="game-muted">{viewMode === 'arranged' ? '点组名选整组 · 左右滚动查看全部手牌' : viewMode === 'stacked' ? '同点数分列 · 金色标记同花顺' : '按点数排列 · 左右滚动查看全部手牌'}</span></div>
+          <div className="game-handscroll" aria-label="手牌，可左右滚动" tabIndex={0}>
+            {viewMode === 'arranged' ? <div className="game-handgroups">{groups.map(group => <div className="game-handgroup" key={group.id}><button className="game-group-label" type="button" aria-pressed={group.cards.every(card => selectedIds.has(card.id))} onClick={() => toggleGroup(group)} title="选中或取消整组">{group.label}</button><div className="game-cardfan">{group.cards.map(card => renderHandCard(card))}</div></div>)}</div> : viewMode === 'rank' ? <div className="game-rankhand game-cardfan">{visibleCards.map(card => renderHandCard(card))}</div> : <div className="game-stackedhand">{[Rank.BigJoker, Rank.SmallJoker, ...Array.from({ length: 13 }, (_, index) => Rank.Ace - index)].filter(rank => handCards.some(card => card.rank === rank)).map(rank => <div className="game-stackcolumn" key={rank}>{SUIT_ORDER.map(suit => <div className="game-stackslot" key={suit}>{handCards.filter(card => card.rank === rank && card.suit === suit).map(card => <div key={card.id} className={straightFlushIds.has(card.id) ? 'game-straight-card' : ''}>{renderHandCard(card, true)}</div>)}</div>)}</div>)}</div>}
           </div>
-      )}
-      
-      {/* Hand Type Selection Modal (for wild cards) */}
-      {showHandSelector && possibleHands.length > 0 && gameState && (
-          <div className="absolute inset-0 bg-black/80 flex items-center justify-center z-50">
-              <div className="bg-[#252526] border border-[#333333] rounded-lg p-6 max-w-md shadow-2xl">
-                  <h2 className="text-2xl font-bold text-[#9cdcfe] mb-4">选择牌型</h2>
-                  <p className="text-gray-400 mb-4">您的牌包含红心{formatLevelRank(gameState.level)}（万能牌），可以组成以下牌型：</p>
-                  <div className="flex flex-col gap-3">
-                      {possibleHands.map((hand, idx) => (
-                          <button
-                              key={idx}
-                              onClick={() => handleHandTypeSelect(hand)}
-                              className="bg-[#3c3c3c] hover:bg-[#4c4c4c] text-white px-6 py-3 rounded-lg font-bold transition-colors text-left"
-                          >
-                              <div className="text-lg">{getHandDescription(hand, gameState.level)}</div>
-                              <div className="text-sm text-gray-400 mt-1">
-                                  点数 {hand.value}
-                                  {hand.bombCount ? ` · ${hand.bombCount}张` : ''}
-                              </div>
-                          </button>
-                      ))}
-                  </div>
-                  <button
-                      onClick={() => {
-                          setShowHandSelector(false);
-                          setPossibleHands([]);
-                      }}
-                      className="mt-4 w-full bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg"
-                  >
-                      取消
-                  </button>
-              </div>
-          </div>
-      )}
-      
-      {/* Target Selection Modal for Skills */}
-      {showTargetSelect && pendingSkill && (
-          <TargetSelectModal
-              skillType={pendingSkill.type}
-              players={getPlayersForTargeting()}
-              mySeat={mySeat}
-              onSelect={handleTargetSelect}
-              onCancel={handleTargetCancel}
-          />
-      )}
-      
-      {/* Game History Window */}
-      {gameState && gameState.history && (
-          <GameHistory
-              history={gameState.history}
-              currentRound={gameState.currentRound || 1}
-              isOpen={showHistory}
-              onClose={() => setShowHistory(false)}
-          />
-      )}
-      
-      {/* History Button (floating) */}
-      {gameState && (
-          <button
-              onClick={() => setShowHistory(true)}
-              className="fixed top-4 right-4 z-40 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg shadow-lg font-medium transition flex items-center gap-2"
-              title="查看游戏历史记录"
-          >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              历史记录
-              {gameState.history && gameState.history.length > 0 && (
-                  <span className="bg-red-500 text-xs px-2 py-0.5 rounded-full">
-                      {gameState.history.length}
-                  </span>
-              )}
-          </button>
-      )}
+          <div className="game-handfooter"><span>Tab 切换卡牌 · 空格 / Enter 选牌</span>{chatBubbles[mySeat] && <span className="game-my-bubble">我：{chatBubbles[mySeat]}</span>}</div>
+        </> : <div className="game-emptyhand">本局手牌已出完，继续为队友加油。</div>}
+      </section>
+
+      {gameState.phase === 'Score' && <section className="game-score-overlay" role="status" aria-label="本局结算"><div><span className="game-eyebrow">ROUND COMPLETE</span><h2>本局结束</h2><ol>{gameState.winners.map((seat, index) => <li key={seat}><span>{WINNER_LABELS[index]}</span><strong>{roomState.players.find(player => player?.seatIndex === seat)?.name || `座位 ${seat + 1}`}</strong></li>)}</ol>{gameState.teamLevels && <p>我方 打{formatLevelRank(gameState.teamLevels[myTeam])} · 对方 打{formatLevelRank(gameState.teamLevels[1 - myTeam])}</p>}<p className="game-muted">即将自动开始下一局…</p></div></section>}
+      <GameDialog open={possibleHands.length > 0 && isMyTurn} labelId={handTitleId} onClose={() => setPossibleHands([])}><div className="game-dialog__header"><h2 id={handTitleId}>选择牌型</h2></div><div className="game-dialog__body game-targets">{possibleHands.map((hand, index) => <button type="button" className="game-button" key={index} onClick={() => { if (isMyTurn && selection.canPlay) onPlay(selectedCards, hand); setPossibleHands([]); }}>{getHandDescription(hand, level)}</button>)}</div><div className="game-dialog__footer"><button type="button" className="game-button" onClick={() => setPossibleHands([])}>取消</button></div></GameDialog>
+      {pendingSkill && isMyTurn && <TargetSelectModal skillType={pendingSkill.type} players={roomState.players.filter((player): player is Player => player !== null).map(player => ({ ...player, handCount: countHand(gameState, player.seatIndex) }))} mySeat={mySeat} onSelect={seat => { if (isMyTurn && countHand(gameState, seat) > 0 && gameState.mySkillCards?.some(skill => skill.id === pendingSkill.id)) onUseSkill?.(pendingSkill.id, seat); setPendingSkill(null); }} onCancel={() => setPendingSkill(null)} />}
+      <GameHistory history={gameState.history || []} currentRound={gameState.currentRound || 1} isOpen={showHistory && !interactionDisabled} onClose={() => setShowHistory(false)} />
     </div>
   );
 };

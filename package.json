@@ -9,7 +9,13 @@
     "dev:server": "ts-node src/server/index.ts",
     "build": "tsc && vite build",
     "start": "node dist/server/index.js",
-    "package": "npm run build && pkg . --targets node18-win-x64 --output guandan-game.exe --public"
+    "package": "npm run build && pkg . --targets node18-win-x64 --output guandan-game.exe --public",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node --require ts-node/register --test tests/client-session.test.ts src/client/components/gameSelection.test.ts tests/persistence.test.ts tests/game-recovery.test.ts tests/snapshot-validation.test.ts",
+    "test:game": "ts-node test-arrange.ts && ts-node test-bot-melds.ts && ts-node test-disconnect-rank.ts && ts-node test-room-lifecycle.ts && ts-node test-bot-game.ts && ts-node test-skill-bot-game.ts",
+    "test": "npm run test:unit && npm run test:game",
+    "check": "npm run typecheck && npm test && npm run build && npm run test:restart",
+    "test:restart": "node --require ts-node/register --test tests/restart-recovery.test.ts"
   },
   "pkg": {
     "assets": [
@@ -37,6 +43,7 @@
     "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.23",
     "concurrently": "^9.2.1",
+    "jsdom": "^26.1.0",
     "pkg": "^5.8.1",
     "postcss": "^8.4.35",
     "tailwindcss": "^3.4.1",

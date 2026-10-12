@@ -10,80 +10,22 @@ interface Props {
   hint?: boolean;
 }
 
-const getSuitSymbol = (suit: Suit) => {
-  switch (suit) {
-    case Suit.Spades: return '♠';
-    case Suit.Hearts: return '♥';
-    case Suit.Clubs: return '♣';
-    case Suit.Diamonds: return '♦';
-    case Suit.Joker: return 'J'; // Special handling
-  }
-};
+const suits = { [Suit.Spades]: '♠', [Suit.Hearts]: '♥', [Suit.Clubs]: '♣', [Suit.Diamonds]: '♦', [Suit.Joker]: '' };
+const suitNames = { [Suit.Spades]: '黑桃', [Suit.Hearts]: '红心', [Suit.Clubs]: '梅花', [Suit.Diamonds]: '方块', [Suit.Joker]: '' };
+const rankLabel = (rank: Rank) => ({ [Rank.Jack]: 'J', [Rank.Queen]: 'Q', [Rank.King]: 'K', [Rank.Ace]: 'A', [Rank.SmallJoker]: '小王', [Rank.BigJoker]: '大王' }[rank] ?? String(rank));
 
-const getRankLabel = (rank: Rank) => {
-  switch (rank) {
-    case Rank.Two: return '2';
-    case Rank.Three: return '3';
-    case Rank.Four: return '4';
-    case Rank.Five: return '5';
-    case Rank.Six: return '6';
-    case Rank.Seven: return '7';
-    case Rank.Eight: return '8';
-    case Rank.Nine: return '9';
-    case Rank.Ten: return '10';
-    case Rank.Jack: return 'J';
-    case Rank.Queen: return 'Q';
-    case Rank.King: return 'K';
-    case Rank.Ace: return 'A';
-    case Rank.SmallJoker: return 'Small Joker';
-    case Rank.BigJoker: return 'Big Joker';
-  }
-};
-
-export const Card: React.FC<Props> = ({ card, selected, onClick, small, isHighlighted, hint }) => {
+export const Card: React.FC<Props> = ({ card, selected = false, onClick, small, isHighlighted, hint }) => {
   const isRed = card.suit === Suit.Hearts || card.suit === Suit.Diamonds || card.rank === Rank.BigJoker;
   const isJoker = card.suit === Suit.Joker;
-  
-  const baseClasses = "relative bg-white rounded shadow-md border border-gray-300 flex flex-col justify-between select-none cursor-pointer transition-transform";
-  const sizeClasses = small 
-    ? "w-8 h-12 text-xs p-1" 
-    : "w-16 h-24 text-base p-2 hover:-translate-y-2";
-  const selectClasses = selected ? "ring-2 ring-blue-500 -translate-y-4" : "";
-  const colorClass = isRed ? "text-red-600" : "text-black";
-  // Highlight animation for new cards - glowing green border with pulse
-  const highlightClasses = isHighlighted 
-    ? "ring-4 ring-green-400 shadow-[0_0_15px_rgba(74,222,128,0.7)] animate-pulse" 
-    : hint
-      ? "ring-2 ring-amber-400"
-      : "";
-
-  if (isJoker) {
-     return (
-        <div 
-          className={`${baseClasses} ${sizeClasses} ${selectClasses} ${highlightClasses} ${colorClass}`}
-          onClick={onClick}
-        >
-           <div className="text-center w-full h-full flex items-center justify-center font-bold writing-vertical">
-               {card.rank === Rank.SmallJoker ? '小王' : '大王'}
-           </div>
-        </div>
-     );
-  }
-
-  return (
-    <div 
-      className={`${baseClasses} ${sizeClasses} ${selectClasses} ${highlightClasses} ${colorClass}`}
-      onClick={onClick}
-    >
-      <div className="font-bold text-left leading-none">{getRankLabel(card.rank)}</div>
-      <div className="absolute inset-0 flex items-center justify-center text-2xl opacity-20 pointer-events-none">
-          {getSuitSymbol(card.suit)}
-      </div>
-      <div className="text-right leading-none self-end">{getSuitSymbol(card.suit)}</div>
-      
-      {card.isLevelCard && (
-          <div className="absolute top-0 right-0 w-2 h-2 bg-yellow-400 rounded-full"></div>
-      )}
-    </div>
-  );
+  const label = `${suitNames[card.suit]}${rankLabel(card.rank)}${card.isWild ? '，万能牌' : card.isLevelCard ? '，级牌' : ''}${hint ? '，可用于进贡或还贡' : ''}`;
+  const className = ['game-card', isRed ? 'game-card--red' : '', small ? 'game-card--small' : '', selected ? 'is-selected' : '', isHighlighted ? 'is-new' : '', hint ? 'is-hint' : ''].filter(Boolean).join(' ');
+  const content = <>
+    <span className="game-card__rank" aria-hidden="true">{rankLabel(card.rank)}{!isJoker && <span className="game-card__corner-suit">{suits[card.suit]}</span>}</span>
+    {!isJoker && <><span className="game-card__watermark" aria-hidden="true">{suits[card.suit]}</span><span className="game-card__suit" aria-hidden="true">{suits[card.suit]}</span></>}
+    {card.isLevelCard && <span className="game-card__level" aria-hidden="true">{card.isWild ? '癞' : '级'}</span>}
+    {selected && <span className="game-card__selected" aria-hidden="true">✓</span>}
+  </>;
+  return onClick ? (
+    <button type="button" className={className} aria-label={label} aria-pressed={selected} onClick={onClick} title={label}>{content}</button>
+  ) : <div className={className} role="img" aria-label={label}>{content}</div>;
 };

@@ -28,7 +28,7 @@ export function rankUnfinishedPlayers(handSizes: number[], finished: number[]): 
   });
 }
 
-enum GamePhase {
+export enum GamePhase {
   Waiting = 'Waiting',
   Dealing = 'Dealing',
   Tribute = 'Tribute',
@@ -54,9 +54,14 @@ export class Game {
   // Callback for when game ends (used by Match)
   onGameEnd?: (winners: number[]) => void;
   
+  onStateChange?: () => void;
+  private recoveryPaused = false;
+
   // Lifecycle management
   private isActive: boolean = true;
   private pendingTimeouts: NodeJS.Timeout[] = [];
+  // Keep exact handlers so ending an old game cannot remove a newer game's listeners.
+  private playerListeners = new Map<Socket, Map<string, (...args: any[]) => void>>();
   
   hands: Card[][] = [[], [], [], []];
   currentTurn: number = 0;
@@ -100,16 +105,56 @@ export class Game {
     });
   }
   
+  /** Explicit data-only allowlist: never serialize sockets, callbacks or timers. */
+  snapshot() {
+      return {
+          level: this.level, currentPhase: this.currentPhase, hands: this.hands,
+          currentTurn: this.currentTurn, lastHand: this.lastHand, passCount: this.passCount,
+          roundActions: this.roundActions, winners: this.winners, tributeState: this.tributeState,
+          teamLevels: this.teamLevels, activeTeam: this.activeTeam, prevWinners: this.prevWinners,
+          gameMode: this.gameMode, skillCards: this.skillCards, skipNextTurn: this.skipNextTurn,
+          newCardIds: this.newCardIds, history: this.history, historyIdCounter: this.historyIdCounter,
+          currentRound: this.currentRound
+      };
+  }
+
+  restore(state: ReturnType<Game['snapshot']>) {
+      // The caller validates the versioned snapshot before creating any live instances.
+      for (const key of Object.keys(this.snapshot())) (this as any)[key] = state[key];
+      this.recoveryPaused = true;
+  }
+
+  resumeAfterRestart() {
+      if (!this.isActive || !this.recoveryPaused) return;
+      this.recoveryPaused = false;
+      if (this.currentPhase === GamePhase.Tribute) this.processAutoTribute();
+      else if (this.currentPhase === GamePhase.ReturnTribute) {
+          this.autoReturnForBots();
+          this.checkReturnDone();
+      } else this.broadcastGameState();
+  }
+
   rebindPlayer(p: Player) {
-      if (!p.isBot && p.socket) {
-          const socket = p.socket;
-          socket.removeAllListeners('playHand');
-          socket.removeAllListeners('pass');
-          socket.removeAllListeners('tribute');
-          socket.removeAllListeners('returnTribute');
-          socket.removeAllListeners('useSkill');
-          this.bindPlayerListeners(p);
+      const previous = this.players[p.seatIndex];
+      if (previous?.socket) this.unbindPlayerListeners(previous.socket);
+      this.players[p.seatIndex] = p;
+      if (!p.isBot && p.socket) this.bindPlayerListeners(p);
+  }
+
+  /** Stop delivery and control immediately when a player leaves or disconnects. */
+  detachPlayer(seat: number, socket: Socket) {
+      this.unbindPlayerListeners(socket);
+      const player = this.players[seat];
+      if (player?.socket === socket) {
+          player.socket = undefined;
+          player.isDisconnected = true;
       }
+  }
+
+  private unbindPlayerListeners(socket: Socket) {
+      const listeners = this.playerListeners.get(socket);
+      listeners?.forEach((listener, event) => socket.off(event, listener));
+      this.playerListeners.delete(socket);
   }
 
   /** 给某一个玩家补发完整牌局，重连时用。 */
@@ -141,22 +186,51 @@ export class Game {
   
   bindPlayerListeners(p: Player) {
       if (!p.socket) return;
-      const s = p.socket;
-      s.on('playHand', (data: { cards: Card[], handType?: Hand } | Card[]) => {
-          // Support both old format (Card[]) and new format ({ cards, handType })
-          if (Array.isArray(data)) {
-              this.handlePlayHand(p.seatIndex, data, undefined);
-          } else {
-              this.handlePlayHand(p.seatIndex, data.cards, data.handType);
+      const socket = p.socket;
+      const seat = p.seatIndex;
+      this.unbindPlayerListeners(socket);
+      const listeners = new Map<string, (...args: any[]) => void>();
+      const bind = (event: string, handler: (data?: any) => void) => {
+          const listener = (data?: any) => {
+              const current = this.players[seat];
+              if (!this.isActive || current?.socket !== socket || current.isDisconnected) return;
+              handler(data);
+          };
+          listeners.set(event, listener);
+          socket.on(event, listener);
+      };
+      const validCards = (cards: unknown): cards is Card[] => Array.isArray(cards)
+          && cards.length <= 256
+          && cards.every(card => card && typeof card === 'object' && typeof card.id === 'string');
+      bind('playHand', (data: unknown) => {
+          // Support the original array payload as well as { cards, handType }.
+          const cards = Array.isArray(data) ? data : (data as { cards?: unknown } | null)?.cards;
+          if (!validCards(cards)) {
+              this.emitError(seat, '出牌格式不正确，请重新选牌');
+              return;
           }
+          this.handlePlayHand(seat, cards);
       });
-      s.on('pass', () => this.handlePass(p.seatIndex));
-      s.on('tribute', (cards: Card[]) => this.handleTribute(p.seatIndex, cards));
-      s.on('returnTribute', (cards: Card[]) => this.handleReturnTribute(p.seatIndex, cards));
-      s.on('useSkill', (data: { skillId: string, targetSeat?: number }) => 
-          this.handleUseSkill(p.seatIndex, data.skillId, data.targetSeat));
+      bind('pass', () => this.handlePass(seat));
+      bind('tribute', (cards: unknown) => {
+          if (validCards(cards)) this.handleTribute(seat, cards);
+          else this.emitError(seat, '请选择一张进贡牌');
+      });
+      bind('returnTribute', (cards: unknown) => {
+          if (validCards(cards)) this.handleReturnTribute(seat, cards);
+          else this.emitError(seat, '请选择一张还贡牌');
+      });
+      bind('useSkill', (data: unknown) => {
+          if (!data || typeof data !== 'object' || typeof (data as any).skillId !== 'string') {
+              this.emitError(seat, '技能格式不正确');
+              return;
+          }
+          const { skillId, targetSeat } = data as { skillId: string; targetSeat?: number };
+          this.handleUseSkill(seat, skillId, targetSeat);
+      });
+      this.playerListeners.set(socket, listeners);
   }
-  
+
   // Lifecycle management methods
   private registerTimeout(timeout: NodeJS.Timeout) {
       this.pendingTimeouts.push(timeout);
@@ -172,18 +246,11 @@ export class Game {
       this.isActive = false;
       this.clearAllTimeouts();
       
-      // Unbind all socket listeners
-      this.players.forEach(p => {
-          if (p.socket) {
-              p.socket.removeAllListeners('playHand');
-              p.socket.removeAllListeners('pass');
-              p.socket.removeAllListeners('tribute');
-              p.socket.removeAllListeners('returnTribute');
-              p.socket.removeAllListeners('useSkill');
-          }
-      });
+      for (const socket of [...this.playerListeners.keys()]) {
+          this.unbindPlayerListeners(socket);
+      }
   }
-  
+
   // History logging methods
   private addHistoryEntry(type: HistoryEventType, message: string, playerIndex?: number, details?: any) {
       const entry: HistoryEntry = {
@@ -485,7 +552,7 @@ export class Game {
   }
 
   private isAutoPlayer(player?: Player): boolean {
-      return !!player && (!!player.isBot || !!player.isDisconnected);
+      return !this.recoveryPaused && !!player && (!!player.isBot || !!player.isDisconnected);
   }
 
   /** 玩家掉线后，出牌、进贡、还贡改由系统代打，直到他重连。 */
@@ -897,6 +964,10 @@ export class Game {
           return;
       }
       
+      if (targetSeat !== undefined && (!Number.isInteger(targetSeat) || targetSeat < 0 || targetSeat > 3)) {
+          this.emitError(seatIndex, '请选择有效的目标玩家');
+          return;
+      }
       const skillIndex = this.skillCards[seatIndex].findIndex(s => s.id === skillId);
       if (skillIndex === -1) {
           this.emitError(seatIndex, '你没有这张技能卡');
@@ -921,7 +992,9 @@ export class Game {
       
       // Apply the skill effect first
       const success = this.applySkillEffect(skill.type, seatIndex, targetSeat);
-      
+      // A skill can finish the entire match and destroy this instance in its callback.
+      if (!this.isActive) return;
+
       if (success) {
           // Only remove the skill card after successful application
           this.skillCards[seatIndex].splice(skillIndex, 1);
@@ -1065,16 +1138,12 @@ export class Game {
           { winners: this.winners, resultType }
       );
       
-      // Broadcast final game state FIRST so clients see the last hand
+      // Apply match progression before checkpointing Score. Restoring this checkpoint
+      // must never apply the level increase twice or lose the next-round transition.
+      this.onGameEnd?.(this.winners);
+      if (!this.isActive) return; // Match completion already sent matchOver.
       this.broadcastGameState();
-      
-      // Then send gameOver event
       this.io.to(this.roomId).emit('gameOver', { winners: this.winners });
-      
-      // Call onGameEnd callback if set (used by Match)
-      if (this.onGameEnd) {
-          this.onGameEnd(this.winners);
-      }
   }
 
   emitError(seatIndex: number, msg: string) {
@@ -1085,6 +1154,7 @@ export class Game {
   }
 
   broadcastGameState() {
+    this.onStateChange?.();
     this.players.forEach((p, idx) => {
         if (!p.isBot && p.socket) {
             const myNewCardIds = this.newCardIds[idx] || [];
@@ -1114,6 +1184,7 @@ export class Game {
   }
 
   private scheduleAutoTurn(seat: number) {
+      if (this.recoveryPaused) return;
       console.log(`[Bot] Scheduling auto turn for seat ${seat}`);
       const timeout = setTimeout(() => {
           if (!this.isActive) return;
@@ -1149,7 +1220,7 @@ export class Game {
 
   handleBotTurn(seatIndex: number) {
       // Check if game is still active
-      if (!this.isActive) {
+      if (!this.isActive || this.recoveryPaused) {
           console.log(`[Bot] Game is no longer active, aborting bot turn`);
           return;
       }

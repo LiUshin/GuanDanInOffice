@@ -1,6 +1,8 @@
 import { Server, Socket } from 'socket.io';
 import { Match } from './match';
 import { GameMode } from '../shared/types';
+import { SnapshotStore } from './persistence';
+import { validateSnapshot } from './snapshotValidation';
 
 export interface Player {
   id: string;
@@ -13,15 +15,99 @@ export interface Player {
   isHost?: boolean;
 }
 
+export interface ServerSnapshot {
+  version: 1;
+  rooms: {
+    id: string;
+    gameMode: GameMode;
+    players: (Omit<Player, 'socket'> | null)[];
+    match: ReturnType<Match['snapshot']> | null;
+  }[];
+}
+
 export class RoomManager {
   private io: Server;
   private rooms: Map<string, Room> = new Map();
 
-  constructor(io: Server) {
+  constructor(io: Server, private store?: SnapshotStore<ServerSnapshot>) {
     this.io = io;
+    const snapshot = store?.load();
+    if (snapshot != null) {
+      validateSnapshot(snapshot);
+      for (const saved of snapshot.rooms) {
+        const room = this.createRoom(saved.id);
+        room.gameMode = saved.gameMode;
+        room.players = saved.players.map(player => player ? {
+          id: player.id, name: player.name, seatIndex: player.seatIndex,
+          isReady: false, isBot: !!player.isBot, isHost: !!player.isHost,
+          isDisconnected: !player.isBot
+        } : null);
+        if (saved.match) {
+          room.match = new Match(io, room.id, room.players as Player[], room.gameMode);
+          room.bindMatch();
+          room.match.restore(saved.match);
+        }
+      }
+    }
+    // Verify the volume is writable before accepting users, even on an empty server.
+    this.persist();
   }
 
-  joinRoom(socket: Socket, playerName: string, roomId: string) {
+  private createRoom(id: string) {
+    const room = new Room(id, this.io);
+    room.onChange = () => this.persist();
+    room.onEmpty = () => { this.rooms.delete(id); this.persist(); };
+    this.rooms.set(id, room);
+    return room;
+  }
+
+  snapshot(): ServerSnapshot {
+    return { version: 1, rooms: [...this.rooms.values()].filter(room => !room.isEmpty()).map(room => ({
+      id: room.id, gameMode: room.gameMode,
+      players: room.players.map(player => player ? {
+        id: player.id, name: player.name, seatIndex: player.seatIndex,
+        isReady: player.isReady, isBot: !!player.isBot,
+        isDisconnected: !!player.isDisconnected, isHost: !!player.isHost
+      } : null),
+      match: room.match?.snapshot() ?? null
+    })) };
+  }
+
+  private persist() {
+    // Fail closed: do not keep accepting play after durable writes stop working.
+    // Uncaught storage errors stop the server; the previous atomic snapshot remains.
+    this.store?.save(this.snapshot());
+  }
+
+  shutdown() {
+    this.persist();
+    for (const room of this.rooms.values()) room.match?.forceEndMatch();
+  }
+
+  joinRoom(socket: Socket, rawPlayerName: unknown, rawRoomId: unknown) {
+    const playerName = typeof rawPlayerName === 'string' ? rawPlayerName.trim() : '';
+    if (!playerName || playerName.length > 10) {
+      socket.emit('error', '昵称须为 1–10 个字符');
+      return;
+    }
+    if (rawRoomId != null && typeof rawRoomId !== 'string') {
+      socket.emit('error', '房间号格式不正确');
+      return;
+    }
+    const roomId = (typeof rawRoomId === 'string' ? rawRoomId.trim() : '') || 'default';
+    if (roomId.length > 40) {
+      socket.emit('error', '房间号不能超过 40 个字符');
+      return;
+    }
+    // A rejected destination must not evict the player from their current room.
+    const destination = this.rooms.get(roomId);
+    if (destination && !destination.hasSocket(socket)) {
+      const error = destination.getJoinError(playerName);
+      if (error) {
+        socket.emit('error', error);
+        return;
+      }
+    }
     for (const [id, existing] of this.rooms) {
       if (!existing.hasSocket(socket)) continue;
       if (id === roomId) {
@@ -33,9 +119,7 @@ export class RoomManager {
 
     let room = this.rooms.get(roomId);
     if (!room) {
-      room = new Room(roomId, this.io);
-      room.onEmpty = () => this.rooms.delete(roomId);
-      this.rooms.set(roomId, room);
+      room = this.createRoom(roomId);
     }
     room.addPlayer(socket, playerName);
     if (room.isEmpty()) this.rooms.delete(roomId);
@@ -73,6 +157,7 @@ class Room {
   match: Match | null = null;
   gameMode: GameMode = GameMode.Normal;
   onEmpty?: () => void;
+  onChange?: () => void;
 
   constructor(id: string, io: Server) {
     this.id = id;
@@ -85,6 +170,12 @@ class Room {
 
   hasSocket(socket: Socket) {
     return this.players.some(player => player && player.socket === socket);
+  }
+
+  getJoinError(name: string): string | null {
+    const existing = this.players.find(player => player && player.name === name);
+    if (existing) return existing.isDisconnected ? null : '这个名字已经在房间里';
+    return this.players.every(player => player !== null) ? '房间已满' : null;
   }
 
   addPlayer(socket: Socket, name: string) {
@@ -101,13 +192,16 @@ class Room {
       socket.join(this.id);
       this.bindSocketListeners(socket);
       this.broadcastState();
+      let recovering = false;
       if (this.match && this.match.currentGame) {
         const game = this.match.currentGame;
-        game.players[player.seatIndex] = player;
         game.rebindPlayer(player);
         game.sendStateTo(player);
+        recovering = this.match.resumeAfterRestart();
       }
-      this.io.to(this.id).emit('notice', `${name} 重新连接`);
+      this.io.to(this.id).emit('notice', recovering
+        ? '已恢复重启前的牌局；真人现在可操作，15 秒后机器人及未重连玩家恢复托管'
+        : `${name} 重新连接`);
       return;
     }
 
@@ -179,6 +273,10 @@ class Room {
       socket.emit('error', '对局进行中无法切换模式');
       return;
     }
+    if (mode !== GameMode.Normal && mode !== GameMode.Skill) {
+      socket.emit('error', '请选择普通或技能模式');
+      return;
+    }
     this.gameMode = mode;
     this.io.to(this.id).emit('notice', `游戏模式已切换为: ${mode === GameMode.Skill ? '技能模式' : '普通模式'}`);
     this.broadcastState();
@@ -187,9 +285,13 @@ class Room {
   handleChat(socket: Socket, msg: string) {
     const player = this.players.find(seated => seated && seated.socket === socket);
     if (!player) return;
+    if (typeof msg !== 'string' || !msg.trim() || msg.trim().length > 200) {
+      socket.emit('error', '聊天消息须为 1–200 个字符');
+      return;
+    }
     this.io.to(this.id).emit('chatMessage', {
       sender: player.name,
-      text: msg,
+      text: msg.trim(),
       time: new Date().toLocaleTimeString(),
       seatIndex: player.seatIndex
     });
@@ -197,7 +299,7 @@ class Room {
 
   switchSeat(socket: Socket, targetSeat: number) {
     if (this.match && this.match.matchWinner === null) return;
-    if (targetSeat < 0 || targetSeat > 3) return;
+    if (!Number.isInteger(targetSeat) || targetSeat < 0 || targetSeat > 3) return;
 
     const currentIdx = this.players.findIndex(player => player && player.socket === socket);
     if (currentIdx === -1 || this.players[targetSeat] !== null) return;
@@ -249,10 +351,10 @@ class Room {
     const player = this.players[index]!;
     const playerName = player.name;
     this.unbind(socket);
+    this.match?.currentGame?.detachPlayer(index, socket);
     player.socket = undefined;
     player.isReady = false;
     socket.leave(this.id);
-    if (explicit) socket.emit('leftRoom');
 
     if (this.inLiveMatch()) {
       player.isDisconnected = true;
@@ -268,6 +370,8 @@ class Room {
     }
     this.broadcastState();
     if (this.isEmpty()) this.onEmpty?.();
+    // Acknowledge only after the departure is durably recorded.
+    if (explicit) socket.emit('leftRoom');
   }
 
   toggleReady(seatIndex: number) {
@@ -305,12 +409,21 @@ class Room {
     });
 
     this.players = gamePlayers;
-    this.broadcastState();
 
     this.match = new Match(this.io, this.id, gamePlayers, this.gameMode);
-    this.match.onMatchEnd = () => this.releaseBots();
+    this.bindMatch();
     this.match.startMatch();
+    this.broadcastState();
     this.io.to(this.id).emit('matchStarted');
+  }
+
+  bindMatch() {
+    this.match!.onStateChange = () => this.onChange?.();
+    this.match!.onMatchEnd = () => {
+      this.match?.destroy();
+      this.match = null;
+      this.releaseBots();
+    };
   }
 
   /** 整场结束后清掉 Bot 和没回来的人，房主仍是原来的玩家。 */
@@ -328,6 +441,7 @@ class Room {
   }
 
   broadcastState() {
+    this.onChange?.();
     const playerList = this.players.map(player => player ? {
       id: player.id,
       name: player.name,
